@@ -9,19 +9,28 @@ import {
   LogOut, 
   User,
   Shield,
-  Activity
+  Building2,
+  Users,
+  Layers,
+  AlertTriangle
 } from 'lucide-react';
 
 const Sidebar = () => {
   const { user, logout } = useAuth();
   const location = useLocation();
 
-  const navigation = [
-    { name: 'Dashboard', href: '/', icon: Home },
+  const allNavigation = [
+    { name: 'Dashboard', href: '/dashboard', icon: Home, roles: ['admin', 'responder', 'viewer'] },
     { name: 'Tickets', href: '/tickets', icon: Ticket },
     { name: 'Map View', href: '/map', icon: Map },
     { name: 'Resources', href: '/resources', icon: Package },
+    { name: 'Organizations', href: '/organizations', icon: Building2, roles: ['admin'] },
+    { name: 'Staff', href: '/staff', icon: Users, roles: ['admin'] },
+    { name: 'Divisions', href: '/divisions', icon: Layers, roles: ['admin'] },
+    { name: 'Emergency Response', href: '/emergency-response', icon: AlertTriangle, roles: ['admin', 'responder'] },
   ];
+  const role = user?.role || 'viewer';
+  const navigation = allNavigation.filter((item) => !item.roles || item.roles.includes(role));
 
   const handleLogout = () => {
     logout();
@@ -36,8 +45,8 @@ const Sidebar = () => {
             <Shield className="w-6 h-6 text-white" />
           </div>
           <div>
-            <h1 className="text-xl font-bold text-gray-900">Disaster Response</h1>
-            <p className="text-sm text-gray-500">Maharashtra</p>
+            <h1 className="text-xl font-bold text-gray-900">Disaster <br />Co-ordination Hub</h1>
+            <p className="text-sm text-gray-500">Telangana</p>
           </div>
         </div>
       </div>

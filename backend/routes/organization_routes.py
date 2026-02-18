@@ -4,6 +4,7 @@ from sqlalchemy import func
 from typing import List, Optional
 from database import get_db, Organization, Division, Staff, SOSRequest
 from models import OrganizationCreate, OrganizationUpdate, OrganizationResponse, OrganizationDashboardStats
+from routes.auth_routes import require_roles
 import uuid
 from datetime import datetime
 
@@ -12,7 +13,8 @@ router = APIRouter()
 @router.post("/", response_model=OrganizationResponse)
 async def create_organization(
     organization_data: OrganizationCreate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(require_roles("admin", "responder")),
 ):
     """Create a new organization"""
     try:
@@ -68,7 +70,8 @@ async def get_organization(org_id: str, db: Session = Depends(get_db)):
 async def update_organization(
     org_id: str,
     org_update: OrganizationUpdate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(require_roles("admin", "responder")),
 ):
     """Update organization information"""
     org = db.query(Organization).filter(Organization.id == org_id).first()
@@ -93,7 +96,11 @@ async def update_organization(
     return org
 
 @router.delete("/{org_id}")
-async def delete_organization(org_id: str, db: Session = Depends(get_db)):
+async def delete_organization(
+    org_id: str,
+    db: Session = Depends(get_db),
+    current_user = Depends(require_roles("admin")),
+):
     """Delete an organization (admin only)"""
     org = db.query(Organization).filter(Organization.id == org_id).first()
     if not org:
@@ -149,7 +156,7 @@ async def get_organization_dashboard(org_id: str, db: Session = Depends(get_db))
         capacity=org.capacity
     )
 
-@router.get("/stats/overview")
+@router.get("/overview/stats")
 async def get_organizations_overview(db: Session = Depends(get_db)):
     """Get overview statistics for all organizations"""
     try:

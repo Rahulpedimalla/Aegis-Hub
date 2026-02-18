@@ -6,6 +6,7 @@ from typing import List, Optional
 
 from database import get_db, Hospital
 from models import HospitalCreate, HospitalUpdate, HospitalResponse
+from routes.auth_routes import require_roles
 import uuid
 from datetime import datetime
 
@@ -14,7 +15,8 @@ router = APIRouter()
 @router.post("/", response_model=HospitalResponse)
 async def create_hospital(
     hospital_data: HospitalCreate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(require_roles("admin", "responder")),
 ):
     """Create a new hospital"""
     try:
@@ -56,12 +58,12 @@ async def get_hospitals(
     
     # Region filtering
     if region:
-        if region.lower() == "western":
-            query = query.filter(Hospital.longitude >= 72.0, Hospital.longitude <= 75.0)
+        if region.lower() == "south":
+            query = query.filter(Hospital.longitude >= 77.0, Hospital.longitude <= 78.4)
         elif region.lower() == "central":
-            query = query.filter(Hospital.longitude >= 75.0, Hospital.longitude <= 78.0)
-        elif region.lower() == "vidarbha":
-            query = query.filter(Hospital.longitude >= 78.0, Hospital.longitude <= 81.0)
+            query = query.filter(Hospital.longitude >= 78.4, Hospital.longitude <= 79.6)
+        elif region.lower() == "north":
+            query = query.filter(Hospital.longitude >= 79.6, Hospital.longitude <= 81.0)
     
     return query.all()
 
@@ -117,12 +119,7 @@ async def get_nearby_hospitals(
 @router.get("/{hospital_id}", response_model=HospitalResponse)
 async def get_hospital(hospital_id: str, db: Session = Depends(get_db)):
     """Get a specific hospital by ID"""
-    try:
-        hospital_uuid = uuid.UUID(hospital_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid UUID format")
-    
-    hospital = db.query(Hospital).filter(Hospital.id == hospital_uuid).first()
+    hospital = db.query(Hospital).filter(Hospital.id == hospital_id).first()
     if not hospital:
         raise HTTPException(status_code=404, detail="Hospital not found")
     
@@ -132,15 +129,11 @@ async def get_hospital(hospital_id: str, db: Session = Depends(get_db)):
 async def update_hospital(
     hospital_id: str,
     hospital_update: HospitalUpdate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(require_roles("admin", "responder")),
 ):
     """Update hospital information"""
-    try:
-        hospital_uuid = uuid.UUID(hospital_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid UUID format")
-    
-    hospital = db.query(Hospital).filter(Hospital.id == hospital_uuid).first()
+    hospital = db.query(Hospital).filter(Hospital.id == hospital_id).first()
     if not hospital:
         raise HTTPException(status_code=404, detail="Hospital not found")
     
@@ -154,14 +147,13 @@ async def update_hospital(
     return hospital
 
 @router.delete("/{hospital_id}")
-async def delete_hospital(hospital_id: str, db: Session = Depends(get_db)):
+async def delete_hospital(
+    hospital_id: str,
+    db: Session = Depends(get_db),
+    current_user = Depends(require_roles("admin")),
+):
     """Delete a hospital (admin only)"""
-    try:
-        hospital_uuid = uuid.UUID(hospital_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid UUID format")
-    
-    hospital = db.query(Hospital).filter(Hospital.id == hospital_uuid).first()
+    hospital = db.query(Hospital).filter(Hospital.id == hospital_id).first()
     if not hospital:
         raise HTTPException(status_code=404, detail="Hospital not found")
     
@@ -170,7 +162,7 @@ async def delete_hospital(hospital_id: str, db: Session = Depends(get_db)):
     
     return {"message": "Hospital deleted successfully"}
 
-@router.get("/stats/overview")
+@router.get("/overview/stats")
 async def get_hospital_overview(db: Session = Depends(get_db)):
     """Get hospital overview statistics"""
     try:
@@ -182,9 +174,9 @@ async def get_hospital_overview(db: Session = Depends(get_db)):
         
         # Region breakdown
         regions = [
-            ("Western Maharashtra", 72.0, 75.0),
-            ("Central Maharashtra", 75.0, 78.0),
-            ("Vidarbha", 78.0, 81.0)
+            ("South Telangana", 77.0, 78.4),
+            ("Central Telangana", 78.4, 79.6),
+            ("North Telangana", 79.6, 81.0)
         ]
         
         region_stats = []

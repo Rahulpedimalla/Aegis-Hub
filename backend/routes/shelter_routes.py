@@ -6,6 +6,7 @@ import math
 
 from database import get_db, Shelter, Organization
 from models import ShelterCreate, ShelterUpdate, ShelterResponse
+from routes.auth_routes import require_roles
 
 router = APIRouter()
 
@@ -159,7 +160,11 @@ async def get_shelter(shelter_id: str, db: Session = Depends(get_db)):
     return shelter
 
 @router.post("/", response_model=ShelterResponse)
-async def create_shelter(shelter_data: ShelterCreate, db: Session = Depends(get_db)):
+async def create_shelter(
+    shelter_data: ShelterCreate,
+    db: Session = Depends(get_db),
+    current_user = Depends(require_roles("admin", "responder")),
+):
     """Create a new shelter"""
     try:
         db_shelter = Shelter(**shelter_data.dict())
@@ -175,7 +180,8 @@ async def create_shelter(shelter_data: ShelterCreate, db: Session = Depends(get_
 async def update_shelter(
     shelter_id: str,
     shelter_update: ShelterUpdate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(require_roles("admin", "responder")),
 ):
     """Update shelter information"""
     shelter = db.query(Shelter).filter(Shelter.id == shelter_id).first()
@@ -191,7 +197,11 @@ async def update_shelter(
     return shelter
 
 @router.delete("/{shelter_id}")
-async def delete_shelter(shelter_id: str, db: Session = Depends(get_db)):
+async def delete_shelter(
+    shelter_id: str,
+    db: Session = Depends(get_db),
+    current_user = Depends(require_roles("admin")),
+):
     """Delete a shelter"""
     shelter = db.query(Shelter).filter(Shelter.id == shelter_id).first()
     if not shelter:
@@ -205,7 +215,8 @@ async def delete_shelter(shelter_id: str, db: Session = Depends(get_db)):
 async def check_in_people(
     shelter_id: str,
     people_count: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(require_roles("admin", "responder")),
 ):
     """Check in people to a shelter"""
     shelter = db.query(Shelter).filter(Shelter.id == shelter_id).first()
@@ -232,7 +243,8 @@ async def check_in_people(
 async def check_out_people(
     shelter_id: str,
     people_count: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(require_roles("admin", "responder")),
 ):
     """Check out people from a shelter"""
     shelter = db.query(Shelter).filter(Shelter.id == shelter_id).first()

@@ -6,6 +6,7 @@ import math
 
 from database import get_db, ResourceCenter, Organization
 from models import ResourceCenterCreate, ResourceCenterUpdate, ResourceCenterResponse
+from routes.auth_routes import require_roles
 
 router = APIRouter()
 
@@ -252,7 +253,11 @@ async def get_resource_center(center_id: str, db: Session = Depends(get_db)):
     return center
 
 @router.post("/", response_model=ResourceCenterResponse)
-async def create_resource_center(resource_data: ResourceCenterCreate, db: Session = Depends(get_db)):
+async def create_resource_center(
+    resource_data: ResourceCenterCreate,
+    db: Session = Depends(get_db),
+    current_user = Depends(require_roles("admin", "responder")),
+):
     """Create a new resource center"""
     try:
         db_center = ResourceCenter(**resource_data.dict())
@@ -268,7 +273,8 @@ async def create_resource_center(resource_data: ResourceCenterCreate, db: Sessio
 async def update_resource_center(
     center_id: str,
     resource_update: ResourceCenterUpdate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(require_roles("admin", "responder")),
 ):
     """Update resource center information"""
     center = db.query(ResourceCenter).filter(ResourceCenter.id == center_id).first()
@@ -284,7 +290,11 @@ async def update_resource_center(
     return center
 
 @router.delete("/{center_id}")
-async def delete_resource_center(center_id: str, db: Session = Depends(get_db)):
+async def delete_resource_center(
+    center_id: str,
+    db: Session = Depends(get_db),
+    current_user = Depends(require_roles("admin")),
+):
     """Delete a resource center"""
     center = db.query(ResourceCenter).filter(ResourceCenter.id == center_id).first()
     if not center:
@@ -298,7 +308,8 @@ async def delete_resource_center(center_id: str, db: Session = Depends(get_db)):
 async def allocate_resources(
     center_id: str,
     allocation_data: dict,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(require_roles("admin", "responder")),
 ):
     """Allocate resources from a center"""
     center = db.query(ResourceCenter).filter(ResourceCenter.id == center_id).first()
@@ -329,7 +340,8 @@ async def allocate_resources(
 async def restock_resources(
     center_id: str,
     restock_data: dict,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(require_roles("admin", "responder")),
 ):
     """Restock resources at a center"""
     center = db.query(ResourceCenter).filter(ResourceCenter.id == center_id).first()

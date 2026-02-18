@@ -4,15 +4,17 @@ from sqlalchemy import func
 from typing import List, Optional
 from database import get_db, Staff, Organization, Division, SOSRequest
 from models import StaffCreate, StaffUpdate, StaffResponse
+from routes.auth_routes import require_roles
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 router = APIRouter()
 
 @router.post("/", response_model=StaffResponse)
 async def create_staff(
     staff_data: StaffCreate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(require_roles("admin", "responder")),
 ):
     """Create a new staff member"""
     try:
@@ -85,7 +87,8 @@ async def get_staff_member(staff_id: str, db: Session = Depends(get_db)):
 async def update_staff(
     staff_id: str,
     staff_update: StaffUpdate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(require_roles("admin", "responder")),
 ):
     """Update staff member information"""
     staff = db.query(Staff).filter(Staff.id == staff_id).first()
@@ -102,7 +105,11 @@ async def update_staff(
     return staff
 
 @router.delete("/{staff_id}")
-async def delete_staff(staff_id: str, db: Session = Depends(get_db)):
+async def delete_staff(
+    staff_id: str,
+    db: Session = Depends(get_db),
+    current_user = Depends(require_roles("admin")),
+):
     """Delete a staff member (admin only)"""
     staff = db.query(Staff).filter(Staff.id == staff_id).first()
     if not staff:
@@ -135,7 +142,7 @@ async def get_staff_workload(staff_id: str, db: Session = Depends(get_db)):
     ).scalar()
     
     # Get completed tickets this week
-    week_ago = datetime.utcnow() - datetime.timedelta(days=7)
+    week_ago = datetime.utcnow() - timedelta(days=7)
     completed_week = db.query(func.count(SOSRequest.id)).filter(
         SOSRequest.assigned_to == staff_id,
         SOSRequest.status == "Done",
@@ -152,7 +159,7 @@ async def get_staff_workload(staff_id: str, db: Session = Depends(get_db)):
         "current_location": staff.current_location
     }
 
-@router.get("/stats/overview")
+@router.get("/overview/stats")
 async def get_staff_overview(db: Session = Depends(get_db)):
     """Get overview statistics for all staff"""
     try:
@@ -208,7 +215,7 @@ async def get_staff_overview(db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching staff overview: {str(e)}")
 
-@router.get("/available")
+@router.get("/overview/available")
 async def get_available_staff(
     organization_id: Optional[str] = Query(None, description="Filter by organization"),
     division_id: Optional[str] = Query(None, description="Filter by division"),

@@ -18,6 +18,11 @@ class OrganizationCreate(OrganizationBase):
     pass
 
 class OrganizationUpdate(BaseModel):
+    name: Optional[str] = None
+    type: Optional[str] = None
+    category: Optional[str] = None
+    address: Optional[str] = None
+    capacity: Optional[int] = Field(None, ge=0)
     current_load: Optional[int] = None
     status: Optional[str] = None
     contact_person: Optional[str] = None
@@ -45,6 +50,10 @@ class DivisionCreate(DivisionBase):
     pass
 
 class DivisionUpdate(BaseModel):
+    name: Optional[str] = None
+    organization_id: Optional[str] = None
+    type: Optional[str] = None
+    capacity: Optional[int] = Field(None, ge=0)
     current_load: Optional[int] = None
     status: Optional[str] = None
     description: Optional[str] = None
@@ -73,8 +82,13 @@ class StaffCreate(StaffBase):
     pass
 
 class StaffUpdate(BaseModel):
+    name: Optional[str] = None
+    organization_id: Optional[str] = None
     division_id: Optional[str] = None
+    role: Optional[str] = None
     skills: Optional[str] = None
+    contact_phone: Optional[str] = None
+    contact_email: Optional[str] = None
     availability: Optional[str] = None
     current_location: Optional[str] = None
     status: Optional[str] = None
@@ -99,6 +113,18 @@ class SOSRequestBase(BaseModel):
 
 class SOSRequestCreate(SOSRequestBase):
     external_id: str = Field(..., description="External ID from n8n")
+
+class SOSIntakeRequest(BaseModel):
+    external_id: Optional[str] = None
+    text: Optional[str] = None
+    voice_transcript: Optional[str] = None
+    people: Optional[int] = Field(1, ge=1)
+    longitude: float = Field(..., ge=-180, le=180)
+    latitude: float = Field(..., ge=-90, le=90)
+    place: Optional[str] = None
+    category_hint: Optional[str] = None
+    source: str = "mobile_app"
+    contact_phone: Optional[str] = None
 
 class SOSRequestUpdate(BaseModel):
     status: Optional[str] = None
@@ -224,6 +250,13 @@ class ResourceCenterBase(BaseModel):
 class ResourceCenterCreate(ResourceCenterBase):
     pass
 
+class ResourceCenterUpdate(BaseModel):
+    inventory: Optional[str] = None
+    current_stock: Optional[int] = Field(None, ge=0)
+    capacity: Optional[int] = Field(None, ge=0)
+    contact_person: Optional[str] = None
+    contact_phone: Optional[str] = None
+
 class ResourceCenterResponse(ResourceCenterBase):
     id: str
     created_at: datetime
@@ -269,6 +302,7 @@ class RegionStats(BaseModel):
 class UserLogin(BaseModel):
     username: str
     password: str
+    role: Optional[str] = None
 
 class UserCreate(BaseModel):
     username: str
@@ -293,6 +327,10 @@ class UserResponse(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
 
 # Map and Location Models
 class Location(BaseModel):
@@ -338,7 +376,7 @@ class FloodAnalysisRequest(BaseModel):
     post_flood_start: str
     post_flood_end: str
     threshold: float = -5.0
-    region: str = "Maharashtra"
+    region: str = "Telangana"
     analysis_type: str = "Sentinel-1 VH Change Detection"
 
 class FloodAnalysisResponse(BaseModel):

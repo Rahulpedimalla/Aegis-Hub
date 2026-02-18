@@ -3,20 +3,25 @@ import {
   Users, 
   AlertTriangle, 
   CheckCircle, 
-  Clock, 
-  TrendingUp,
   MapPin,
-  Activity
+  Activity,
+  Building2,
+  Layers
 } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import axios from 'axios';
 import toast from 'react-hot-toast';
+import { useAuth } from '../contexts/AuthContext';
 
 const Dashboard = () => {
+  const { user } = useAuth();
   const [stats, setStats] = useState(null);
   const [regionStats, setRegionStats] = useState([]);
   const [recentActivity, setRecentActivity] = useState([]);
   const [criticalAlerts, setCriticalAlerts] = useState(null);
+  const [orgStats, setOrgStats] = useState(null);
+  const [staffStats, setStaffStats] = useState(null);
+  const [divisionStats, setDivisionStats] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -26,44 +31,29 @@ const Dashboard = () => {
   const fetchDashboardData = async () => {
     try {
       setLoading(true);
-      const [statsRes, regionRes, activityRes, alertsRes] = await Promise.all([
+      const [statsRes, regionRes, activityRes, alertsRes, orgRes, staffRes, divisionRes] = await Promise.all([
         axios.get('/api/dashboard/stats'),
         axios.get('/api/dashboard/regions'),
         axios.get('/api/dashboard/recent-activity'),
-        axios.get('/api/dashboard/critical-alerts')
+        axios.get('/api/dashboard/critical-alerts'),
+        axios.get('/api/organizations/overview/stats'),
+        axios.get('/api/staff/overview/stats'),
+        axios.get('/api/divisions/overview/stats')
       ]);
 
       setStats(statsRes.data);
       setRegionStats(regionRes.data);
       setRecentActivity(activityRes.data);
       setCriticalAlerts(alertsRes.data);
+      setOrgStats(orgRes.data);
+      setStaffStats(staffRes.data);
+      setDivisionStats(divisionRes.data);
     } catch (error) {
       toast.error('Failed to fetch dashboard data');
       console.error('Dashboard data fetch error:', error);
     } finally {
       setLoading(false);
     }
-  };
-
-  const getPriorityColor = (priority) => {
-    const colors = {
-      1: 'bg-gray-100 text-gray-700',
-      2: 'bg-blue-100 text-blue-700',
-      3: 'bg-yellow-100 text-yellow-700',
-      4: 'bg-orange-100 text-orange-700',
-      5: 'bg-red-100 text-red-700'
-    };
-    return colors[priority] || colors[1];
-  };
-
-  const getStatusColor = (status) => {
-    const colors = {
-      'Pending': 'bg-yellow-100 text-yellow-800',
-      'In Progress': 'bg-blue-100 text-blue-800',
-      'Done': 'bg-green-100 text-green-800',
-      'Cancelled': 'bg-gray-100 text-gray-800'
-    };
-    return colors[status] || colors['Pending'];
   };
 
   if (loading) {
@@ -86,6 +76,28 @@ const Dashboard = () => {
     { name: 'Completed', value: stats?.completed_sos || 0, color: '#22c55e' }
   ];
 
+  const orgTypeData = orgStats?.type_breakdown?.map(item => ({
+    name: item.type,
+    value: item.count,
+    color: item.type === 'Government' ? '#8b5cf6' : 
+           item.type === 'NGO' ? '#f97316' : 
+           item.type === 'Volunteer Group' ? '#ec4899' : '#6366f1'
+  })) || [];
+
+  const staffRoleData = staffStats?.role_breakdown?.map(item => ({
+    name: item.role,
+    value: item.count,
+    color: item.role === 'Manager' ? '#8b5cf6' : 
+           item.role === 'Specialist' ? '#3b82f6' : 
+           item.role === 'Worker' ? '#f97316' : '#ec4899'
+  })) || [];
+
+  const roleCapabilities = {
+    admin: 'Full control over tickets, emergency operations, organizations, staff, divisions and resources.',
+    responder: 'Can manage incidents and emergency response workflows with operational updates.',
+    viewer: 'Read-only monitoring access to dashboards, maps and incident visibility.',
+  };
+
   return (
     <div className="p-6 space-y-6">
       {/* Header */}
@@ -93,6 +105,9 @@ const Dashboard = () => {
         <div>
           <h1 className="text-3xl font-bold text-gray-900">Dashboard</h1>
           <p className="text-gray-600">Overview of disaster response operations</p>
+          <p className="text-sm text-blue-700 mt-1">
+            Role: <span className="font-semibold capitalize">{user?.role || 'viewer'}</span> - {roleCapabilities[user?.role] || roleCapabilities.viewer}
+          </p>
         </div>
         <div className="flex items-center space-x-2 text-sm text-gray-500">
           <Activity className="w-4 h-4" />
@@ -100,54 +115,129 @@ const Dashboard = () => {
         </div>
       </div>
 
-      {/* Stats Cards */}
+      {/* Main Statistics Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+        {/* SOS Requests */}
+        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
           <div className="flex items-center justify-between">
             <div>
               <p className="text-sm font-medium text-gray-600">Total SOS Requests</p>
-              <p className="text-3xl font-bold text-gray-900">{stats?.total_sos || 0}</p>
+              <p className="text-2xl font-bold text-gray-900">{stats?.total_sos || 0}</p>
             </div>
-            <div className="w-12 h-12 bg-blue-100 rounded-lg flex items-center justify-center">
-              <AlertTriangle className="w-6 h-6 text-blue-600" />
-            </div>
+            <AlertTriangle className="w-8 h-8 text-red-600" />
+          </div>
+          <div className="mt-4 flex items-center text-sm">
+            <span className="text-gray-500">Pending: </span>
+            <span className="ml-1 font-medium text-yellow-600">{stats?.pending_sos || 0}</span>
+            <span className="text-gray-500 ml-4">In Progress: </span>
+            <span className="ml-1 font-medium text-blue-600">{stats?.in_progress_sos || 0}</span>
           </div>
         </div>
 
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+        {/* People Affected */}
+        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
           <div className="flex items-center justify-between">
             <div>
               <p className="text-sm font-medium text-gray-600">People Affected</p>
-              <p className="text-3xl font-bold text-gray-900">{stats?.total_people_affected || 0}</p>
+              <p className="text-2xl font-bold text-gray-900">{stats?.total_people_affected || 0}</p>
             </div>
-            <div className="w-12 h-12 bg-red-100 rounded-lg flex items-center justify-center">
-              <Users className="w-6 h-6 text-red-600" />
+            <Users className="w-8 h-8 text-blue-600" />
+          </div>
+          <div className="mt-4 flex items-center text-sm">
+            <span className="text-gray-500">Active Cases: </span>
+            <span className="ml-1 font-medium text-orange-600">
+              {(stats?.pending_sos || 0) + (stats?.in_progress_sos || 0)}
+            </span>
+          </div>
+        </div>
+
+        {/* Organizations */}
+        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-gray-600">Organizations</p>
+              <p className="text-2xl font-bold text-gray-900">{orgStats?.total_organizations || 0}</p>
+            </div>
+            <Building2 className="w-8 h-8 text-purple-600" />
+          </div>
+          <div className="mt-4 flex items-center text-sm">
+            <span className="text-gray-500">Capacity: </span>
+            <span className="ml-1 font-medium text-green-600">{orgStats?.total_capacity || 0}</span>
+            <span className="text-gray-500 ml-4">Load: </span>
+            <span className="ml-1 font-medium text-orange-600">{orgStats?.current_load || 0}</span>
+          </div>
+        </div>
+
+        {/* Staff */}
+        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-gray-600">Staff Members</p>
+              <p className="text-2xl font-bold text-gray-900">{staffStats?.total_staff || 0}</p>
+            </div>
+            <Users className="w-8 h-8 text-green-600" />
+          </div>
+          <div className="mt-4 flex items-center text-sm">
+            <span className="text-gray-500">Available: </span>
+            <span className="ml-1 font-medium text-green-600">{staffStats?.available_staff || 0}</span>
+            <span className="text-gray-500 ml-4">Active: </span>
+            <span className="ml-1 font-medium text-blue-600">{staffStats?.active_staff || 0}</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Secondary Statistics */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        {/* Shelters */}
+        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-semibold text-gray-900">Shelters</h3>
+            <MapPin className="w-6 h-6 text-green-600" />
+          </div>
+          <div className="space-y-2">
+            <div className="flex justify-between">
+              <span className="text-gray-600">Total Capacity:</span>
+              <span className="font-medium">{stats?.total_shelter_capacity || 0}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-600">Available:</span>
+              <span className="font-medium text-green-600">{stats?.available_shelter_capacity || 0}</span>
             </div>
           </div>
         </div>
 
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-gray-600">Shelter Capacity</p>
-              <p className="text-3xl font-bold text-gray-900">{stats?.available_shelter_capacity || 0}</p>
-              <p className="text-sm text-gray-500">Available</p>
+        {/* Hospitals */}
+        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-semibold text-gray-900">Hospitals</h3>
+            <Activity className="w-6 h-6 text-blue-600" />
+          </div>
+          <div className="space-y-2">
+            <div className="flex justify-between">
+              <span className="text-gray-600">Total Beds:</span>
+              <span className="font-medium">{stats?.total_hospital_beds || 0}</span>
             </div>
-            <div className="w-12 h-12 bg-green-100 rounded-lg flex items-center justify-center">
-              <MapPin className="w-6 h-6 text-green-600" />
+            <div className="flex justify-between">
+              <span className="text-gray-600">Available:</span>
+              <span className="font-medium text-green-600">{stats?.available_hospital_beds || 0}</span>
             </div>
           </div>
         </div>
 
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-gray-600">Hospital Beds</p>
-              <p className="text-3xl font-bold text-gray-900">{stats?.available_hospital_beds || 0}</p>
-              <p className="text-sm text-gray-500">Available</p>
+        {/* Divisions */}
+        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-semibold text-gray-900">Divisions</h3>
+            <Layers className="w-6 h-6 text-purple-600" />
+          </div>
+          <div className="space-y-2">
+            <div className="flex justify-between">
+              <span className="text-gray-600">Total:</span>
+              <span className="font-medium">{divisionStats?.total_divisions || 0}</span>
             </div>
-            <div className="w-12 h-12 bg-purple-100 rounded-lg flex items-center justify-center">
-              <CheckCircle className="w-6 h-6 text-purple-600" />
+            <div className="flex justify-between">
+              <span className="text-gray-600">Active:</span>
+              <span className="font-medium text-green-600">{divisionStats?.active_divisions || 0}</span>
             </div>
           </div>
         </div>
@@ -155,8 +245,8 @@ const Dashboard = () => {
 
       {/* Charts Section */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Region Chart */}
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+        {/* SOS Requests by Region */}
+        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
           <h3 className="text-lg font-semibold text-gray-900 mb-4">SOS Requests by Region</h3>
           <ResponsiveContainer width="100%" height={300}>
             <BarChart data={chartData}>
@@ -165,22 +255,24 @@ const Dashboard = () => {
               <YAxis />
               <Tooltip />
               <Bar dataKey="SOS Requests" fill="#3b82f6" />
+              <Bar dataKey="People Affected" fill="#ef4444" />
             </BarChart>
           </ResponsiveContainer>
         </div>
 
-        {/* Status Pie Chart */}
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
-          <h3 className="text-lg font-semibold text-gray-900 mb-4">Request Status Distribution</h3>
+        {/* SOS Status Distribution */}
+        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+          <h3 className="text-lg font-semibold text-gray-900 mb-4">SOS Status Distribution</h3>
           <ResponsiveContainer width="100%" height={300}>
             <PieChart>
               <Pie
                 data={pieData}
                 cx="50%"
                 cy="50%"
-                innerRadius={60}
-                outerRadius={100}
-                paddingAngle={5}
+                labelLine={false}
+                label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                outerRadius={80}
+                fill="#8884d8"
                 dataKey="value"
               >
                 {pieData.map((entry, index) => (
@@ -193,106 +285,97 @@ const Dashboard = () => {
         </div>
       </div>
 
-      {/* Critical Alerts */}
-      {criticalAlerts && (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200">
-          <div className="p-6 border-b border-gray-200">
-            <h3 className="text-lg font-semibold text-gray-900 flex items-center space-x-2">
-              <AlertTriangle className="w-5 h-5 text-red-500" />
-              <span>Critical Alerts</span>
-            </h3>
-          </div>
-          <div className="p-6">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              {/* Critical SOS */}
-              <div>
-                <h4 className="font-medium text-gray-900 mb-3">High Priority SOS ({criticalAlerts.critical_sos.length})</h4>
-                <div className="space-y-2">
-                  {criticalAlerts.critical_sos.slice(0, 3).map((sos) => (
-                    <div key={sos.id} className="p-3 bg-red-50 rounded-lg border border-red-200">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm font-medium text-red-800">{sos.category}</span>
-                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${getPriorityColor(sos.priority)}`}>
-                          P{sos.priority}
-                        </span>
-                      </div>
-                      <p className="text-sm text-red-700 mt-1">{sos.place}</p>
-                      <p className="text-xs text-red-600 mt-1">{sos.people} people affected</p>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Full Shelters */}
-              <div>
-                <h4 className="font-medium text-gray-900 mb-3">Shelters at Capacity ({criticalAlerts.full_shelters.length})</h4>
-                <div className="space-y-2">
-                  {criticalAlerts.full_shelters.slice(0, 3).map((shelter) => (
-                    <div key={shelter.id} className="p-3 bg-orange-50 rounded-lg border border-orange-200">
-                      <p className="text-sm font-medium text-orange-800">{shelter.name}</p>
-                      <p className="text-sm text-orange-700 mt-1">{shelter.address}</p>
-                      <p className="text-xs text-orange-600 mt-1">
-                        {shelter.occupancy}/{shelter.capacity} occupied
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Low Bed Hospitals */}
-              <div>
-                <h4 className="font-medium text-gray-900 mb-3">Low Bed Availability ({criticalAlerts.low_bed_hospitals.length})</h4>
-                <div className="space-y-2">
-                  {criticalAlerts.low_bed_hospitals.slice(0, 3).map((hospital) => (
-                    <div key={hospital.id} className="p-3 bg-yellow-50 rounded-lg border border-yellow-200">
-                      <p className="text-sm font-medium text-yellow-800">{hospital.name}</p>
-                      <p className="text-sm text-yellow-700 mt-1">{hospital.address}</p>
-                      <p className="text-xs text-yellow-600 mt-1">
-                        {hospital.available_beds}/{hospital.total_beds} beds available
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
+      {/* Organization and Staff Charts */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Organization Types */}
+        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+          <h3 className="text-lg font-semibold text-gray-900 mb-4">Organization Types</h3>
+          <ResponsiveContainer width="100%" height={300}>
+            <PieChart>
+              <Pie
+                data={orgTypeData}
+                cx="50%"
+                cy="50%"
+                labelLine={false}
+                label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                outerRadius={80}
+                fill="#8884d8"
+                dataKey="value"
+              >
+                {orgTypeData.map((entry, index) => (
+                  <Cell key={`cell-${index}`} fill={entry.color} />
+                ))}
+              </Pie>
+              <Tooltip />
+            </PieChart>
+          </ResponsiveContainer>
         </div>
-      )}
 
-      {/* Recent Activity */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200">
-        <div className="p-6 border-b border-gray-200">
-          <h3 className="text-lg font-semibold text-gray-900 flex items-center space-x-2">
-            <Clock className="w-5 h-5 text-gray-500" />
-            <span>Recent Activity</span>
-          </h3>
+        {/* Staff Roles */}
+        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+          <h3 className="text-lg font-semibold text-gray-900 mb-4">Staff Roles</h3>
+          <ResponsiveContainer width="100%" height={300}>
+            <PieChart>
+              <Pie
+                data={staffRoleData}
+                cx="50%"
+                cy="50%"
+                labelLine={false}
+                label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                outerRadius={80}
+                fill="#8884d8"
+                dataKey="value"
+              >
+                {staffRoleData.map((entry, index) => (
+                  <Cell key={`cell-${index}`} fill={entry.color} />
+                ))}
+              </Pie>
+              <Tooltip />
+            </PieChart>
+          </ResponsiveContainer>
         </div>
-        <div className="p-6">
+      </div>
+
+      {/* Recent Activity and Critical Alerts */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Recent Activity */}
+        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+          <h3 className="text-lg font-semibold text-gray-900 mb-4">Recent Activity</h3>
           <div className="space-y-4">
-            {recentActivity.map((activity) => (
-              <div key={activity.id} className="flex items-center space-x-4 p-4 bg-gray-50 rounded-lg">
-                <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center">
-                  <Activity className="w-5 h-5 text-blue-600" />
-                </div>
+            {recentActivity.slice(0, 5).map((activity, index) => (
+              <div key={index} className="flex items-start space-x-3">
+                <div className="w-2 h-2 bg-blue-500 rounded-full mt-2"></div>
                 <div className="flex-1">
-                  <p className="text-sm font-medium text-gray-900">
-                    {activity.category} - {activity.place}
-                  </p>
-                  <p className="text-sm text-gray-600">
-                    {activity.people} people affected • Priority {activity.priority}
-                  </p>
-                </div>
-                <div className="flex items-center space-x-2">
-                  <span className={`px-3 py-1 rounded-full text-xs font-medium ${getStatusColor(activity.status)}`}>
-                    {activity.status}
-                  </span>
-                  <span className="text-xs text-gray-500">
-                    {new Date(activity.timestamp).toLocaleTimeString()}
-                  </span>
+                  <p className="text-sm text-gray-900">{activity.description}</p>
+                  <p className="text-xs text-gray-500">{new Date(activity.timestamp).toLocaleString()}</p>
                 </div>
               </div>
             ))}
           </div>
+        </div>
+
+        {/* Critical Alerts */}
+        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+          <h3 className="text-lg font-semibold text-gray-900 mb-4">Critical Alerts</h3>
+          {criticalAlerts && criticalAlerts.length > 0 ? (
+            <div className="space-y-4">
+              {criticalAlerts.slice(0, 5).map((alert, index) => (
+                <div key={index} className="flex items-start space-x-3 p-3 bg-red-50 rounded-lg">
+                  <AlertTriangle className="w-5 h-5 text-red-600 mt-0.5" />
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-red-900">{alert.title}</p>
+                    <p className="text-xs text-red-700">{alert.description}</p>
+                    <p className="text-xs text-red-600 mt-1">{new Date(alert.timestamp).toLocaleString()}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-center py-8">
+              <CheckCircle className="w-12 h-12 text-green-500 mx-auto mb-2" />
+              <p className="text-gray-500">No critical alerts at the moment</p>
+            </div>
+          )}
         </div>
       </div>
     </div>

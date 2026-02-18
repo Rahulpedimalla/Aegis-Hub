@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from typing import List
+from datetime import datetime
 
 from database import get_db, SOSRequest, Shelter, Hospital, ResourceCenter, Organization, Staff
 from models import DashboardStats, RegionStats
@@ -52,12 +53,12 @@ async def get_dashboard_stats(db: Session = Depends(get_db)):
 
 @router.get("/regions", response_model=List[RegionStats])
 async def get_region_stats(db: Session = Depends(get_db)):
-    """Get statistics by region (Western, Central, Vidarbha)"""
+    """Get statistics by Telangana zones (South, Central, North)."""
     try:
         regions = [
-            ("Western Maharashtra", 72.0, 75.0),
-            ("Central Maharashtra", 75.0, 78.0),
-            ("Vidarbha", 78.0, 81.0)
+            ("South Telangana", 77.0, 78.4),
+            ("Central Telangana", 78.4, 79.6),
+            ("North Telangana", 79.6, 81.0)
         ]
         
         region_stats = []
@@ -112,6 +113,7 @@ async def get_recent_activity(db: Session = Depends(get_db), limit: int = 10):
                 "category": sos.category,
                 "people": sos.people,
                 "place": sos.place,
+                "description": f"{sos.category} at {sos.place} ({sos.people} people) is {sos.status}",
                 "timestamp": sos.updated_at,
                 "priority": sos.priority
             }
@@ -140,39 +142,37 @@ async def get_critical_alerts(db: Session = Depends(get_db)):
             Hospital.available_beds <= Hospital.total_beds * 0.1
         ).limit(10).all()
         
-        return {
-            "critical_sos": [
-                {
-                    "id": str(sos.id),
-                    "priority": sos.priority,
-                    "category": sos.category,
-                    "people": sos.people,
-                    "place": sos.place,
-                    "created_at": sos.created_at
-                }
-                for sos in critical_sos
-            ],
-            "full_shelters": [
-                {
-                    "id": str(shelter.id),
-                    "name": shelter.name,
-                    "occupancy": shelter.current_occupancy,
-                    "capacity": shelter.capacity,
-                    "address": shelter.address
-                }
-                for shelter in full_shelters
-            ],
-            "low_bed_hospitals": [
-                {
-                    "id": str(hospital.id),
-                    "name": hospital.name,
-                    "available_beds": hospital.available_beds,
-                    "total_beds": hospital.total_beds,
-                    "address": hospital.address
-                }
-                for hospital in low_bed_hospitals
-            ]
-        }
+        alerts = []
+
+        for sos in critical_sos:
+            alerts.append({
+                "id": str(sos.id),
+                "title": f"Critical SOS: {sos.category}",
+                "description": f"{sos.people} people affected at {sos.place}",
+                "timestamp": sos.created_at,
+                "severity": "critical"
+            })
+
+        for shelter in full_shelters:
+            alerts.append({
+                "id": str(shelter.id),
+                "title": f"Shelter Near Capacity: {shelter.name}",
+                "description": f"{shelter.current_occupancy}/{shelter.capacity} occupied",
+                "timestamp": datetime.utcnow(),
+                "severity": "high"
+            })
+
+        for hospital in low_bed_hospitals:
+            alerts.append({
+                "id": str(hospital.id),
+                "title": f"Low Beds: {hospital.name}",
+                "description": f"{hospital.available_beds}/{hospital.total_beds} beds available",
+                "timestamp": datetime.utcnow(),
+                "severity": "high"
+            })
+
+        alerts.sort(key=lambda x: x["timestamp"], reverse=True)
+        return alerts
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching critical alerts: {str(e)}")
 

@@ -40,19 +40,37 @@ code {
   background: #a8a8a8;
 }
 
-/* Mapbox GL custom styles */
-.mapboxgl-popup-content {
+/* Leaflet custom styles */
+.leaflet-popup-content-wrapper {
   border-radius: 8px;
   box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
 }
 
-.mapboxgl-popup-close-button {
+.leaflet-popup-close-button {
   font-size: 18px;
   color: #6b7280;
+  padding: 4px 8px;
 }
 
-.mapboxgl-popup-close-button:hover {
+.leaflet-popup-close-button:hover {
   color: #374151;
+}
+
+/* Map container styles */
+.leaflet-container {
+  height: 100%;
+  width: 100%;
+}
+
+.leaflet-div-icon {
+  background: transparent;
+  border: none;
+}
+
+/* Custom marker styles */
+.custom-marker {
+  background: transparent !important;
+  border: none !important;
 }
 
 /* Custom animations */
@@ -107,4 +125,23 @@ code {
 @keyframes spin {
   0% { transform: rotate(0deg); }
   100% { transform: rotate(360deg); }
+}
+
+/* Responsive utilities */
+@media (max-width: 768px) {
+  .mobile-hidden {
+    display: none;
+  }
+  
+  .mobile-full {
+    width: 100%;
+  }
+}
+
+/* Dark mode support */
+@media (prefers-color-scheme: dark) {
+  .dark-mode-toggle {
+    background-color: #374151;
+    color: #f9fafb;
+  }
 }

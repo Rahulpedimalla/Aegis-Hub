@@ -1,26 +1,42 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Search, 
-  Filter, 
   MapPin, 
   Users, 
   Clock, 
   AlertTriangle,
   CheckCircle,
-  X,
   Edit,
-  Navigation
+  Plus,
+  Trash2,
+  Navigation,
+  Building,
+  Heart
 } from 'lucide-react';
 import axios from 'axios';
 import toast from 'react-hot-toast';
 import TicketModal from '../components/TicketModal';
+import { useAuth } from '../contexts/AuthContext';
 
 const Tickets = () => {
+  const { user } = useAuth();
+  const canEdit = user?.role === 'admin' || user?.role === 'responder';
+  const isAdmin = user?.role === 'admin';
   const [tickets, setTickets] = useState([]);
   const [filteredTickets, setFilteredTickets] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedTicket, setSelectedTicket] = useState(null);
   const [showModal, setShowModal] = useState(false);
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [creatingTicket, setCreatingTicket] = useState(false);
+  const [newTicket, setNewTicket] = useState({
+    people: 1,
+    longitude: 78.4867,
+    latitude: 17.3850,
+    text: '',
+    place: '',
+    category: 'General Emergency',
+  });
   const [filters, setFilters] = useState({
     status: '',
     category: '',
@@ -32,10 +48,6 @@ const Tickets = () => {
   useEffect(() => {
     fetchTickets();
   }, []);
-
-  useEffect(() => {
-    applyFilters();
-  }, [tickets, filters, searchTerm]);
 
   const fetchTickets = async () => {
     try {
@@ -50,7 +62,7 @@ const Tickets = () => {
     }
   };
 
-  const applyFilters = () => {
+  const applyFilters = useCallback(() => {
     let filtered = [...tickets];
 
     // Apply search filter
@@ -81,15 +93,19 @@ const Tickets = () => {
     if (filters.region) {
       filtered = filtered.filter(ticket => {
         const lon = ticket.longitude;
-        if (filters.region === 'western') return lon >= 72.0 && lon <= 75.0;
-        if (filters.region === 'central') return lon >= 75.0 && lon <= 78.0;
-        if (filters.region === 'vidarbha') return lon >= 78.0 && lon <= 81.0;
+        if (filters.region === 'south') return lon >= 77.0 && lon <= 78.4;
+        if (filters.region === 'central') return lon >= 78.4 && lon <= 79.6;
+        if (filters.region === 'north') return lon >= 79.6 && lon <= 81.0;
         return true;
       });
     }
 
     setFilteredTickets(filtered);
-  };
+  }, [tickets, filters, searchTerm]);
+
+  useEffect(() => {
+    applyFilters();
+  }, [applyFilters]);
 
   const handleTicketClick = (ticket) => {
     setSelectedTicket(ticket);
@@ -97,6 +113,11 @@ const Tickets = () => {
   };
 
   const handleStatusUpdate = async (ticketId, newStatus, notes) => {
+    if (!canEdit) {
+      toast.error('Read-only access: viewers cannot update tickets');
+      return;
+    }
+
     try {
       await axios.put(`/api/sos/${ticketId}`, {
         status: newStatus,
@@ -115,6 +136,66 @@ const Tickets = () => {
     } catch (error) {
       toast.error('Failed to update ticket status');
       console.error('Status update error:', error);
+    }
+  };
+
+  const handleCreateTicket = async () => {
+    if (!isAdmin) {
+      toast.error('Only admins can create tickets');
+      return;
+    }
+
+    if (!newTicket.text || !newTicket.place || !newTicket.category) {
+      toast.error('Please fill all required fields');
+      return;
+    }
+
+    try {
+      setCreatingTicket(true);
+      const payload = {
+        external_id: `ADMIN-${Date.now()}`,
+        people: Number(newTicket.people),
+        longitude: Number(newTicket.longitude),
+        latitude: Number(newTicket.latitude),
+        text: newTicket.text,
+        place: newTicket.place,
+        category: newTicket.category,
+      };
+      await axios.post('/api/sos/', payload);
+      toast.success('Ticket created successfully');
+      setShowCreateModal(false);
+      setNewTicket({
+        people: 1,
+        longitude: 78.4867,
+        latitude: 17.3850,
+        text: '',
+        place: '',
+        category: 'General Emergency',
+      });
+      await fetchTickets();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Failed to create ticket');
+    } finally {
+      setCreatingTicket(false);
+    }
+  };
+
+  const handleDeleteTicket = async (ticketId) => {
+    if (!isAdmin) {
+      toast.error('Only admins can delete tickets');
+      return;
+    }
+
+    if (!window.confirm('Delete this ticket permanently?')) {
+      return;
+    }
+
+    try {
+      await axios.delete(`/api/sos/${ticketId}`);
+      toast.success('Ticket deleted successfully');
+      await fetchTickets();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Failed to delete ticket');
     }
   };
 
@@ -158,9 +239,9 @@ const Tickets = () => {
 
   const categories = [...new Set(tickets.map(ticket => ticket.category))];
   const regions = [
-    { value: 'western', label: 'Western Maharashtra' },
-    { value: 'central', label: 'Central Maharashtra' },
-    { value: 'vidarbha', label: 'Vidarbha' }
+    { value: 'south', label: 'South Telangana' },
+    { value: 'central', label: 'Central Telangana' },
+    { value: 'north', label: 'North Telangana' }
   ];
 
   return (
@@ -171,8 +252,42 @@ const Tickets = () => {
           <h1 className="text-3xl font-bold text-gray-900">SOS Tickets</h1>
           <p className="text-gray-600">Manage emergency response requests</p>
         </div>
-        <div className="text-sm text-gray-500">
-          Total: {tickets.length} • Pending: {tickets.filter(t => t.status === 'Pending').length}
+        <div className="flex items-center space-x-3">
+          {isAdmin && (
+            <button
+              onClick={() => setShowCreateModal(true)}
+              className="inline-flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Create Ticket</span>
+            </button>
+          )}
+          <div className="text-sm text-gray-500">
+            Total: {tickets.length} • Pending: {tickets.filter(t => t.status === 'Pending').length}
+          </div>
+        </div>
+      </div>
+
+      {/* Facility Status Summary */}
+      <div className="bg-gradient-to-r from-blue-50 to-green-50 p-4 rounded-xl border border-blue-200">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-6">
+            <div className="flex items-center space-x-2">
+              <Building className="w-5 h-5 text-green-600" />
+              <span className="text-sm font-medium text-green-800">Shelters Available</span>
+            </div>
+            <div className="flex items-center space-x-2">
+              <Heart className="w-5 h-5 text-red-600" />
+              <span className="text-sm font-medium text-red-800">Hospitals Available</span>
+            </div>
+            <div className="flex items-center space-x-2">
+              <Navigation className="w-5 h-5 text-blue-600" />
+              <span className="text-sm font-medium text-blue-800">Quick Navigation</span>
+            </div>
+          </div>
+          <div className="text-xs text-blue-600">
+            💡 Click facility icons for quick Google Maps access
+          </div>
         </div>
       </div>
 
@@ -310,14 +425,73 @@ const Tickets = () => {
                           <span>Assigned to: {ticket.assigned_to}</span>
                         </div>
                       )}
+                      {/* Facility Availability Indicator */}
+                      <div className="flex items-center space-x-2">
+                        <div className="flex items-center space-x-1 text-green-600">
+                          <Building className="w-3 h-3" />
+                          <span className="text-xs">Shelter</span>
+                        </div>
+                        <div className="flex items-center space-x-1 text-red-600">
+                          <Heart className="w-3 h-3" />
+                          <span className="text-xs">Hospital</span>
+                        </div>
+                      </div>
                     </div>
                   </div>
                   
                   <div className="ml-4 flex items-center space-x-2">
-                    <button className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100">
+                    <button 
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        // Quick view of nearest facilities
+                        window.open(`https://www.google.com/maps/search/hospitals+near+${ticket.latitude},${ticket.longitude}`, '_blank');
+                      }}
+                      className="p-2 text-red-400 hover:text-red-600 rounded-lg hover:bg-red-50"
+                      title="Find nearby hospitals"
+                    >
+                      <Heart className="w-4 h-4" />
+                    </button>
+                    <button 
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        // Quick view of nearest shelters
+                        window.open(`https://www.google.com/maps/search/shelters+near+${ticket.latitude},${ticket.longitude}`, '_blank');
+                      }}
+                      className="p-2 text-green-400 hover:text-green-600 rounded-lg hover:bg-green-50"
+                      title="Find nearby shelters"
+                    >
+                      <Building className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleTicketClick(ticket);
+                      }}
+                      className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
+                      disabled={!canEdit}
+                      title={canEdit ? 'Edit ticket' : 'Read-only access'}
+                    >
                       <Edit className="w-4 h-4" />
                     </button>
-                    <button className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100">
+                    {isAdmin && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteTicket(ticket.id);
+                        }}
+                        className="p-2 text-red-400 hover:text-red-600 rounded-lg hover:bg-red-50"
+                        title="Delete ticket"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    )}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        window.open(`https://www.google.com/maps/dir/?api=1&destination=${ticket.latitude},${ticket.longitude}`, '_blank');
+                      }}
+                      className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
+                    >
                       <Navigation className="w-4 h-4" />
                     </button>
                   </div>
@@ -328,6 +502,106 @@ const Tickets = () => {
         </div>
       </div>
 
+      {showCreateModal && isAdmin && (
+        <div className="fixed inset-0 bg-black/40 z-40 flex items-center justify-center p-4">
+          <div className="w-full max-w-xl bg-white rounded-xl shadow-xl p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-xl font-semibold text-gray-900">Create Ticket</h3>
+              <button
+                onClick={() => setShowCreateModal(false)}
+                className="text-gray-500 hover:text-gray-700"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="md:col-span-2">
+                <label className="block text-sm text-gray-700 mb-1">Description</label>
+                <textarea
+                  rows={3}
+                  value={newTicket.text}
+                  onChange={(e) => setNewTicket({ ...newTicket, text: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                  placeholder="Describe the incident"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm text-gray-700 mb-1">Place</label>
+                <input
+                  type="text"
+                  value={newTicket.place}
+                  onChange={(e) => setNewTicket({ ...newTicket, place: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                  placeholder="Location name"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm text-gray-700 mb-1">Category</label>
+                <input
+                  type="text"
+                  value={newTicket.category}
+                  onChange={(e) => setNewTicket({ ...newTicket, category: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                  placeholder="Flood Rescue / Medical Emergency"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm text-gray-700 mb-1">People</label>
+                <input
+                  type="number"
+                  min="1"
+                  value={newTicket.people}
+                  onChange={(e) => setNewTicket({ ...newTicket, people: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm text-gray-700 mb-1">Latitude</label>
+                <input
+                  type="number"
+                  step="0.0001"
+                  value={newTicket.latitude}
+                  onChange={(e) => setNewTicket({ ...newTicket, latitude: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm text-gray-700 mb-1">Longitude</label>
+                <input
+                  type="number"
+                  step="0.0001"
+                  value={newTicket.longitude}
+                  onChange={(e) => setNewTicket({ ...newTicket, longitude: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end space-x-3 pt-2">
+              <button
+                onClick={() => setShowCreateModal(false)}
+                className="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleCreateTicket}
+                disabled={creatingTicket}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+              >
+                {creatingTicket ? 'Creating...' : 'Create'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Ticket Modal */}
       {showModal && selectedTicket && (
         <TicketModal
@@ -335,6 +609,7 @@ const Tickets = () => {
           isOpen={showModal}
           onClose={() => setShowModal(false)}
           onStatusUpdate={handleStatusUpdate}
+          canEdit={canEdit}
         />
       )}
     </div>

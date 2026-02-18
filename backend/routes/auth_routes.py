@@ -4,16 +4,17 @@ from sqlalchemy.orm import Session
 from passlib.context import CryptContext
 from jose import JWTError, jwt
 from datetime import datetime, timedelta
-from typing import Optional, List
+from typing import Optional, List, Callable
 import uuid
+import os
 
 from database import get_db, User
-from models import UserLogin, UserCreate, UserResponse, Token
+from models import UserLogin, UserCreate, UserResponse, Token, ChangePasswordRequest
 
 router = APIRouter()
 
 # Security configuration
-SECRET_KEY = "your-secret-key-here"  # In production, use environment variable
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "dev-secret-change-in-production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
@@ -68,6 +69,20 @@ async def get_current_user(
         )
     
     return user
+
+
+def require_roles(*roles: str) -> Callable:
+    required = {r.lower() for r in roles}
+
+    async def _role_guard(current_user: User = Depends(get_current_user)):
+        if current_user.role.lower() not in required:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access denied. Required role: {', '.join(roles)}"
+            )
+        return current_user
+
+    return _role_guard
 
 @router.post("/register", response_model=UserResponse)
 async def register_user(user_data: UserCreate, db: Session = Depends(get_db)):
@@ -141,6 +156,14 @@ async def login_user(user_credentials: UserLogin, db: Session = Depends(get_db))
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="User account is deactivated"
             )
+
+        # If role is provided by client, enforce role match.
+        if user_credentials.role and user.role.lower() != user_credentials.role.lower():
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Selected role does not match credentials",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         
         # Create access token
         access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -191,22 +214,21 @@ async def update_current_user(
 
 @router.post("/change-password")
 async def change_password(
-    current_password: str,
-    new_password: str,
+    payload: ChangePasswordRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Change user password"""
     try:
         # Verify current password
-        if not verify_password(current_password, current_user.hashed_password):
+        if not verify_password(payload.current_password, current_user.hashed_password):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Current password is incorrect"
             )
         
         # Hash new password
-        new_hashed_password = get_password_hash(new_password)
+        new_hashed_password = get_password_hash(payload.new_password)
         current_user.hashed_password = new_hashed_password
         
         db.commit()
@@ -250,12 +272,7 @@ async def update_user_role(
             detail="Not enough permissions"
         )
     
-    try:
-        user_uuid = uuid.UUID(user_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid UUID format")
-    
-    user = db.query(User).filter(User.id == user_uuid).first()
+    user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     

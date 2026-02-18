@@ -42,11 +42,12 @@ export const AuthProvider = ({ children }) => {
     }
   };
 
-  const login = async (username, password) => {
+  const login = async (username, password, role) => {
     try {
       const response = await axios.post('/api/auth/login', {
         username,
-        password
+        password,
+        role
       });
 
       const { access_token } = response.data;

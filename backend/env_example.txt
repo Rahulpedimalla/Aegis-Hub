@@ -21,3 +21,7 @@ LOG_LEVEL=INFO
 # Security
 DEBUG=False
 ENVIRONMENT=production
+
+# AI Assignment (Gemini)
+GEMINI_API_KEY=your-gemini-api-key
+GEMINI_MODEL=gemini-2.5-flash

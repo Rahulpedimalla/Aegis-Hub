@@ -6,19 +6,21 @@ import {
   MapPin, 
   Phone, 
   Search,
-  Filter,
   Plus,
   Edit,
-  Trash2,
   CheckCircle,
   X
 } from 'lucide-react';
 import axios from 'axios';
 import toast from 'react-hot-toast';
+import { useAuth } from '../contexts/AuthContext';
 
 const Resources = () => {
+  const { user } = useAuth();
+  const canEdit = user?.role === 'admin' || user?.role === 'responder';
   const [shelters, setShelters] = useState([]);
   const [hospitals, setHospitals] = useState([]);
+  const [resourceCenters, setResourceCenters] = useState([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('shelters');
   const [searchTerm, setSearchTerm] = useState('');
@@ -35,13 +37,15 @@ const Resources = () => {
   const fetchResources = async () => {
     try {
       setLoading(true);
-      const [sheltersRes, hospitalsRes] = await Promise.all([
+      const [sheltersRes, hospitalsRes, centersRes] = await Promise.all([
         axios.get('/api/shelters/'),
-        axios.get('/api/hospitals/')
+        axios.get('/api/hospitals/'),
+        axios.get('/api/resources/')
       ]);
 
       setShelters(sheltersRes.data);
       setHospitals(hospitalsRes.data);
+      setResourceCenters(centersRes.data);
     } catch (error) {
       toast.error('Failed to fetch resources');
       console.error('Resources fetch error:', error);
@@ -51,6 +55,10 @@ const Resources = () => {
   };
 
   const handleShelterUpdate = async (shelterId, updates) => {
+    if (!canEdit) {
+      toast.error('Read-only access: viewers cannot update resources');
+      return;
+    }
     try {
       await axios.put(`/api/shelters/${shelterId}`, updates);
       setShelters(shelters.map(shelter => 
@@ -63,6 +71,10 @@ const Resources = () => {
   };
 
   const handleHospitalUpdate = async (hospitalId, updates) => {
+    if (!canEdit) {
+      toast.error('Read-only access: viewers cannot update resources');
+      return;
+    }
     try {
       await axios.put(`/api/hospitals/${hospitalId}`, updates);
       setHospitals(hospitals.map(hospital => 
@@ -74,20 +86,26 @@ const Resources = () => {
     }
   };
 
-  const getStatusColor = (status) => {
-    const colors = {
-      'Available': 'bg-green-100 text-green-800',
-      'Active': 'bg-blue-100 text-blue-800',
-      'Full': 'bg-red-100 text-red-800',
-      'Inactive': 'bg-gray-100 text-gray-800'
-    };
-    return colors[status] || colors['Available'];
+  const handleResourceCenterUpdate = async (centerId, updates) => {
+    if (!canEdit) {
+      toast.error('Read-only access: viewers cannot update resources');
+      return;
+    }
+    try {
+      await axios.put(`/api/resources/${centerId}`, updates);
+      setResourceCenters(resourceCenters.map(center =>
+        center.id === centerId ? { ...center, ...updates } : center
+      ));
+      toast.success('Resource center updated successfully');
+    } catch (error) {
+      toast.error('Failed to update resource center');
+    }
   };
 
   const getRegionName = (longitude) => {
-    if (longitude >= 72.0 && longitude <= 75.0) return 'Western Maharashtra';
-    if (longitude >= 75.0 && longitude <= 78.0) return 'Central Maharashtra';
-    if (longitude >= 78.0 && longitude <= 81.0) return 'Vidarbha';
+    if (longitude >= 77.0 && longitude <= 78.4) return 'South Telangana';
+    if (longitude >= 78.4 && longitude <= 79.6) return 'Central Telangana';
+    if (longitude >= 79.6 && longitude <= 81.0) return 'North Telangana';
     return 'Unknown';
   };
 
@@ -111,6 +129,16 @@ const Resources = () => {
     return true;
   });
 
+  const filteredResourceCenters = resourceCenters.filter(center => {
+    if (searchTerm && !center.name.toLowerCase().includes(searchTerm.toLowerCase())) return false;
+    if (filters.type && !(center.type || '').toLowerCase().includes(filters.type.toLowerCase())) return false;
+    if (filters.region) {
+      const region = getRegionName(center.longitude);
+      if (region.toLowerCase() !== filters.region.toLowerCase()) return false;
+    }
+    return true;
+  });
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -121,7 +149,8 @@ const Resources = () => {
 
   const shelterTypes = [...new Set(shelters.map(s => s.type))];
   const shelterStatuses = [...new Set(shelters.map(s => s.status))];
-  const regions = ['Western Maharashtra', 'Central Maharashtra', 'Vidarbha'];
+  const resourceTypes = [...new Set(resourceCenters.map(c => c.type).filter(Boolean))];
+  const regions = ['South Telangana', 'Central Telangana', 'North Telangana'];
 
   return (
     <div className="p-6 space-y-6">
@@ -133,7 +162,7 @@ const Resources = () => {
         </div>
         <div className="flex items-center space-x-4">
           <div className="text-sm text-gray-500">
-            Shelters: {shelters.length} • Hospitals: {hospitals.length}
+            Shelters: {shelters.length} • Hospitals: {hospitals.length} • Centers: {resourceCenters.length}
           </div>
         </div>
       </div>
@@ -161,6 +190,16 @@ const Resources = () => {
           >
             Hospitals ({hospitals.length})
           </button>
+          <button
+            onClick={() => setActiveTab('centers')}
+            className={`py-2 px-1 border-b-2 font-medium text-sm ${
+              activeTab === 'centers'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+            }`}
+          >
+            Resource Centers ({resourceCenters.length})
+          </button>
         </nav>
       </div>
 
@@ -181,8 +220,8 @@ const Resources = () => {
             </div>
           </div>
 
-          {/* Type Filter (Shelters only) */}
-          {activeTab === 'shelters' && (
+          {/* Type Filter */}
+          {(activeTab === 'shelters' || activeTab === 'centers') && (
             <div>
               <select
                 value={filters.type}
@@ -190,7 +229,7 @@ const Resources = () => {
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               >
                 <option value="">All Types</option>
-                {shelterTypes.map(type => (
+                {(activeTab === 'shelters' ? shelterTypes : resourceTypes).map(type => (
                   <option key={type} value={type}>{type}</option>
                 ))}
               </select>
@@ -244,6 +283,7 @@ const Resources = () => {
                 shelter={shelter}
                 onUpdate={handleShelterUpdate}
                 region={getRegionName(shelter.longitude)}
+                canEdit={canEdit}
               />
             ))}
           </div>
@@ -264,6 +304,28 @@ const Resources = () => {
                 hospital={hospital}
                 onUpdate={handleHospitalUpdate}
                 region={getRegionName(hospital.longitude)}
+                canEdit={canEdit}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'centers' && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200">
+          <div className="p-6 border-b border-gray-200">
+            <h3 className="text-lg font-semibold text-gray-900">
+              Resource Centers ({filteredResourceCenters.length})
+            </h3>
+          </div>
+          <div className="divide-y divide-gray-200">
+            {filteredResourceCenters.map((center) => (
+              <ResourceCenterCard
+                key={center.id}
+                center={center}
+                onUpdate={handleResourceCenterUpdate}
+                region={getRegionName(center.longitude)}
+                canEdit={canEdit}
               />
             ))}
           </div>
@@ -274,7 +336,7 @@ const Resources = () => {
 };
 
 // Shelter Card Component
-const ShelterCard = ({ shelter, onUpdate, region }) => {
+const ShelterCard = ({ shelter, onUpdate, region, canEdit }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [editData, setEditData] = useState({
     current_occupancy: shelter.current_occupancy,
@@ -364,6 +426,8 @@ const ShelterCard = ({ shelter, onUpdate, region }) => {
             <button
               onClick={() => setIsEditing(true)}
               className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
+              disabled={!canEdit}
+              title={canEdit ? 'Edit shelter' : 'Read-only access'}
             >
               <Edit className="w-4 h-4" />
             </button>
@@ -372,7 +436,7 @@ const ShelterCard = ({ shelter, onUpdate, region }) => {
       </div>
 
       {/* Edit Form */}
-      {isEditing && (
+      {isEditing && canEdit && (
         <div className="mt-4 p-4 bg-gray-50 rounded-lg">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
@@ -411,7 +475,7 @@ const ShelterCard = ({ shelter, onUpdate, region }) => {
 };
 
 // Hospital Card Component
-const HospitalCard = ({ hospital, onUpdate, region }) => {
+const HospitalCard = ({ hospital, onUpdate, region, canEdit }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [editData, setEditData] = useState({
     available_beds: hospital.available_beds,
@@ -492,6 +556,8 @@ const HospitalCard = ({ hospital, onUpdate, region }) => {
             <button
               onClick={() => setIsEditing(true)}
               className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
+              disabled={!canEdit}
+              title={canEdit ? 'Edit hospital' : 'Read-only access'}
             >
               <Edit className="w-4 h-4" />
             </button>
@@ -500,7 +566,7 @@ const HospitalCard = ({ hospital, onUpdate, region }) => {
       </div>
 
       {/* Edit Form */}
-      {isEditing && (
+      {isEditing && canEdit && (
         <div className="mt-4 p-4 bg-gray-50 rounded-lg">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
@@ -526,6 +592,139 @@ const HospitalCard = ({ hospital, onUpdate, region }) => {
                 max={hospital.icu_beds}
                 value={editData.available_icu}
                 onChange={(e) => setEditData({ ...editData, available_icu: parseInt(e.target.value) })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const ResourceCenterCard = ({ center, onUpdate, region, canEdit }) => {
+  const [isEditing, setIsEditing] = useState(false);
+  const [editData, setEditData] = useState({
+    current_stock: center.current_stock,
+    capacity: center.capacity,
+    inventory: center.inventory || ''
+  });
+
+  const handleSave = () => {
+    onUpdate(center.id, editData);
+    setIsEditing(false);
+  };
+
+  const handleCancel = () => {
+    setEditData({
+      current_stock: center.current_stock,
+      capacity: center.capacity,
+      inventory: center.inventory || ''
+    });
+    setIsEditing(false);
+  };
+
+  return (
+    <div className="p-6 hover:bg-gray-50 transition-colors duration-200">
+      <div className="flex items-start justify-between">
+        <div className="flex-1">
+          <div className="flex items-center space-x-3 mb-3">
+            <div className="w-10 h-10 bg-orange-100 rounded-lg flex items-center justify-center">
+              <Plus className="w-5 h-5 text-orange-600" />
+            </div>
+            <div>
+              <h4 className="text-lg font-semibold text-gray-900">{center.name}</h4>
+              <p className="text-sm text-gray-500">{region}</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+            <div className="flex items-center space-x-2">
+              <MapPin className="w-4 h-4 text-gray-400" />
+              <span className="text-sm text-gray-600">{center.address}</span>
+            </div>
+            <div className="flex items-center space-x-2">
+              <Users className="w-4 h-4 text-gray-400" />
+              <span className="text-sm text-gray-600">
+                {center.current_stock}/{center.capacity} stock
+              </span>
+            </div>
+            <div className="flex items-center space-x-2">
+              <Phone className="w-4 h-4 text-gray-400" />
+              <span className="text-sm text-gray-600">{center.contact_phone}</span>
+            </div>
+          </div>
+
+          <div className="flex items-center space-x-4">
+            <span className="text-sm text-gray-500">Type: {center.type}</span>
+            <span className="text-sm text-gray-500">Contact: {center.contact_person}</span>
+          </div>
+        </div>
+
+        <div className="ml-4 flex items-center space-x-2">
+          {isEditing ? (
+            <>
+              <button
+                onClick={handleSave}
+                className="p-2 text-green-600 hover:text-green-700 rounded-lg hover:bg-green-100"
+              >
+                <CheckCircle className="w-4 h-4" />
+              </button>
+              <button
+                onClick={handleCancel}
+                className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={() => setIsEditing(true)}
+              className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
+              disabled={!canEdit}
+              title={canEdit ? 'Edit resource center' : 'Read-only access'}
+            >
+              <Edit className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {isEditing && canEdit && (
+        <div className="mt-4 p-4 bg-gray-50 rounded-lg">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Current Stock
+              </label>
+              <input
+                type="number"
+                min="0"
+                value={editData.current_stock}
+                onChange={(e) => setEditData({ ...editData, current_stock: parseInt(e.target.value || '0', 10) })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Capacity
+              </label>
+              <input
+                type="number"
+                min="0"
+                value={editData.capacity}
+                onChange={(e) => setEditData({ ...editData, capacity: parseInt(e.target.value || '0', 10) })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+            </div>
+            <div className="md:col-span-2">
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Inventory
+              </label>
+              <input
+                type="text"
+                value={editData.inventory}
+                onChange={(e) => setEditData({ ...editData, inventory: e.target.value })}
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               />
             </div>

@@ -1,14 +1,23 @@
-import React, { useState, useEffect } from 'react';
-import { X, MapPin, Users, Clock, AlertTriangle, CheckCircle, Navigation, Phone, Mail } from 'lucide-react';
-import MapView from 'react-map-gl';
-import 'mapbox-gl/dist/mapbox-gl.css';
+import React, { useState, useEffect, useCallback } from 'react';
+import { X, MapPin, Users, Clock, AlertTriangle, CheckCircle, Navigation, Building, Heart, ExternalLink } from 'lucide-react';
+import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
+import axios from 'axios';
 
-const TicketModal = ({ ticket, isOpen, onClose, onStatusUpdate }) => {
+// Fix for default markers in Leaflet
+delete L.Icon.Default.prototype._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: require('leaflet/dist/images/marker-icon-2x.png'),
+  iconUrl: require('leaflet/dist/images/marker-icon.png'),
+  shadowUrl: require('leaflet/dist/images/marker-shadow.png'),
+});
+
+const TicketModal = ({ ticket, isOpen, onClose, onStatusUpdate, canEdit = true }) => {
   const [status, setStatus] = useState(ticket.status);
   const [notes, setNotes] = useState(ticket.notes || '');
-  const [view, setView] = useState('details'); // 'details' or 'map'
-
-  const MAPBOX_TOKEN = process.env.REACT_APP_MAPBOX_TOKEN || 'pk.eyJ1IjoiZXhhbXBsZSIsImEiOiJjbGV4YW1wbGUifQ.example';
+  const [nearestFacilities, setNearestFacilities] = useState(null);
+  const [loadingFacilities, setLoadingFacilities] = useState(false);
 
   const statusOptions = [
     { value: 'Pending', label: 'Pending', icon: Clock, color: 'bg-yellow-100 text-yellow-800' },
@@ -29,6 +38,7 @@ const TicketModal = ({ ticket, isOpen, onClose, onStatusUpdate }) => {
   };
 
   const handleStatusUpdate = () => {
+    if (!canEdit) return;
     onStatusUpdate(ticket.id, status, notes);
   };
 
@@ -36,6 +46,26 @@ const TicketModal = ({ ticket, isOpen, onClose, onStatusUpdate }) => {
     const url = `https://www.google.com/maps?q=${ticket.latitude},${ticket.longitude}`;
     window.open(url, '_blank');
   };
+
+  const fetchNearestFacilities = useCallback(async () => {
+    if (!ticket?.id) return;
+    try {
+      setLoadingFacilities(true);
+      const response = await axios.get(`/api/sos/${ticket.id}/nearest-facilities`);
+      setNearestFacilities(response.data);
+    } catch (error) {
+      console.error('Error fetching nearest facilities:', error);
+      // Don't show error toast as this is not critical
+    } finally {
+      setLoadingFacilities(false);
+    }
+  }, [ticket?.id]);
+
+  useEffect(() => {
+    if (isOpen && ticket) {
+      fetchNearestFacilities();
+    }
+  }, [isOpen, ticket, fetchNearestFacilities]);
 
   if (!isOpen) return null;
 
@@ -103,14 +133,16 @@ const TicketModal = ({ ticket, isOpen, onClose, onStatusUpdate }) => {
                 </div>
 
                 {/* Description */}
-                <div>
-                  <h4 className="font-medium text-gray-900 mb-2">Description</h4>
-                  <p className="text-gray-600 bg-gray-50 p-3 rounded-lg">
-                    {ticket.text}
-                  </p>
-                </div>
+                {ticket.text && (
+                  <div>
+                    <h4 className="font-medium text-gray-900 mb-2">Description</h4>
+                    <div className="bg-gray-50 p-3 rounded-lg">
+                      <p className="text-sm text-gray-600">{ticket.text}</p>
+                    </div>
+                  </div>
+                )}
 
-                {/* Coordinates */}
+                {/* Location */}
                 <div>
                   <h4 className="font-medium text-gray-900 mb-2">Location Coordinates</h4>
                   <div className="bg-gray-50 p-3 rounded-lg">
@@ -137,6 +169,7 @@ const TicketModal = ({ ticket, isOpen, onClose, onStatusUpdate }) => {
                     <select
                       value={status}
                       onChange={(e) => setStatus(e.target.value)}
+                      disabled={!canEdit}
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                     >
                       {statusOptions.map(option => (
@@ -151,14 +184,16 @@ const TicketModal = ({ ticket, isOpen, onClose, onStatusUpdate }) => {
                       value={notes}
                       onChange={(e) => setNotes(e.target.value)}
                       rows={3}
+                      disabled={!canEdit}
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                     />
                     
                     <button
                       onClick={handleStatusUpdate}
-                      className="w-full bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition-colors duration-200"
+                      disabled={!canEdit}
+                      className="w-full bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition-colors duration-200 disabled:bg-gray-400 disabled:cursor-not-allowed"
                     >
-                      Update Status
+                      {canEdit ? 'Update Status' : 'Read-Only'}
                     </button>
                   </div>
                 </div>
@@ -172,6 +207,113 @@ const TicketModal = ({ ticket, isOpen, onClose, onStatusUpdate }) => {
                     </div>
                   </div>
                 )}
+
+                {/* Nearest Facilities */}
+                <div>
+                  <h4 className="font-medium text-gray-900 mb-3">Nearest Available Facilities</h4>
+                  
+                  {loadingFacilities ? (
+                    <div className="bg-gray-50 p-3 rounded-lg">
+                      <p className="text-sm text-gray-600">Finding nearest facilities...</p>
+                    </div>
+                  ) : nearestFacilities ? (
+                    <div className="space-y-3">
+                      {/* Nearest Shelter */}
+                      {nearestFacilities.nearest_shelter && (
+                        <div className="bg-green-50 p-3 rounded-lg border border-green-200">
+                          <div className="flex items-start justify-between">
+                            <div className="flex-1">
+                              <div className="flex items-center space-x-2 mb-2">
+                                <Building className="w-4 h-4 text-green-600" />
+                                <h5 className="font-medium text-green-800">Nearest Shelter</h5>
+                              </div>
+                              <p className="text-sm font-medium text-green-700 mb-1">
+                                {nearestFacilities.nearest_shelter.name}
+                              </p>
+                              <p className="text-xs text-green-600 mb-2">
+                                {nearestFacilities.nearest_shelter.address}
+                              </p>
+                              <div className="flex items-center space-x-4 text-xs text-green-600 mb-2">
+                                <span>📏 {nearestFacilities.nearest_shelter.distance_km} km away</span>
+                                <span>🛏️ {nearestFacilities.nearest_shelter.available_capacity} beds available</span>
+                              </div>
+                              {nearestFacilities.nearest_shelter.contact_phone && (
+                                <p className="text-xs text-green-600">
+                                  📞 {nearestFacilities.nearest_shelter.contact_phone}
+                                </p>
+                              )}
+                            </div>
+                            <a
+                              href={nearestFacilities.nearest_shelter.google_maps_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="flex items-center space-x-1 text-green-600 hover:text-green-700 text-xs font-medium"
+                            >
+                              <ExternalLink className="w-3 h-3" />
+                              <span>Navigate</span>
+                            </a>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Nearest Hospital */}
+                      {nearestFacilities.nearest_hospital && (
+                        <div className="bg-red-50 p-3 rounded-lg border border-red-200">
+                          <div className="flex items-start justify-between">
+                            <div className="flex-1">
+                              <div className="flex items-center space-x-2 mb-2">
+                                <Heart className="w-4 h-4 text-red-600" />
+                                <h5 className="font-medium text-red-800">Nearest Hospital</h5>
+                              </div>
+                              <p className="text-sm font-medium text-red-700 mb-1">
+                                {nearestFacilities.nearest_hospital.name}
+                              </p>
+                              <p className="text-xs text-red-600 mb-2">
+                                {nearestFacilities.nearest_hospital.address}
+                              </p>
+                              <div className="flex items-center space-x-4 text-xs text-red-600 mb-2">
+                                <span>📏 {nearestFacilities.nearest_hospital.distance_km} km away</span>
+                                <span>🛏️ {nearestFacilities.nearest_hospital.available_beds} beds available</span>
+                                {nearestFacilities.nearest_hospital.available_icu > 0 && (
+                                  <span>🏥 {nearestFacilities.nearest_hospital.available_icu} ICU available</span>
+                                )}
+                              </div>
+                              {nearestFacilities.nearest_hospital.contact_phone && (
+                                <p className="text-xs text-red-600">
+                                  📞 {nearestFacilities.nearest_hospital.contact_phone}
+                                </p>
+                              )}
+                            </div>
+                            <a
+                              href={nearestFacilities.nearest_hospital.google_maps_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="flex items-center space-x-1 text-red-600 hover:text-red-700 text-xs font-medium"
+                            >
+                              <ExternalLink className="w-3 h-3" />
+                              <span>Navigate</span>
+                            </a>
+                          </div>
+                        </div>
+                      )}
+
+                      {!nearestFacilities.nearest_shelter && !nearestFacilities.nearest_hospital && (
+                        <div className="bg-yellow-50 p-3 rounded-lg border border-yellow-200">
+                          <p className="text-sm text-yellow-700">
+                            ⚠️ No available facilities found within search radius. 
+                            Consider expanding search area or checking facility status.
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="bg-gray-50 p-3 rounded-lg">
+                      <p className="text-sm text-gray-600">
+                        Unable to load facility information at this time.
+                      </p>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </div>
@@ -179,29 +321,92 @@ const TicketModal = ({ ticket, isOpen, onClose, onStatusUpdate }) => {
           {/* Right Panel - Map */}
           <div className="w-1/2 border-l border-gray-200">
             <div className="h-full">
-              <MapView
-                mapboxAccessToken={MAPBOX_TOKEN}
-                initialViewState={{
-                  longitude: ticket.longitude,
-                  latitude: ticket.latitude,
-                  zoom: 12
-                }}
+              <MapContainer
+                center={[ticket.latitude, ticket.longitude]}
+                zoom={12}
                 style={{ width: '100%', height: '100%' }}
-                mapStyle="mapbox://styles/mapbox/streets-v11"
+                className="h-full"
               >
+                <TileLayer
+                  url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                  attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                />
+                
                 {/* SOS Location Marker */}
-                <div
-                  style={{
-                    position: 'absolute',
-                    left: '50%',
-                    top: '50%',
-                    transform: 'translate(-50%, -50%)',
-                    zIndex: 1
-                  }}
-                >
-                  <div className="w-6 h-6 bg-red-500 rounded-full border-2 border-white shadow-lg animate-pulse"></div>
-                </div>
-              </MapView>
+                <Marker position={[ticket.latitude, ticket.longitude]}>
+                  <Popup>
+                    <div className="text-center">
+                      <h3 className="font-semibold text-red-600">🚨 SOS Request</h3>
+                      <p className="text-sm text-gray-600">{ticket.category}</p>
+                      <p className="text-sm text-gray-600">{ticket.place}</p>
+                      <p className="text-sm text-gray-600">{ticket.people} people affected</p>
+                    </div>
+                  </Popup>
+                </Marker>
+
+                {/* Nearest Shelter Marker */}
+                {nearestFacilities?.nearest_shelter && (
+                  <Marker 
+                    position={[nearestFacilities.nearest_shelter.latitude, nearestFacilities.nearest_shelter.longitude]}
+                    icon={L.divIcon({
+                      className: 'custom-div-icon',
+                      html: '<div style="background-color: #10B981; width: 20px; height: 20px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 4px rgba(0,0,0,0.5);"></div>',
+                      iconSize: [20, 20],
+                      iconAnchor: [10, 10]
+                    })}
+                  >
+                    <Popup>
+                      <div className="text-center">
+                        <h3 className="font-semibold text-green-600">🏠 Nearest Shelter</h3>
+                        <p className="text-sm text-gray-600">{nearestFacilities.nearest_shelter.name}</p>
+                        <p className="text-sm text-gray-600">{nearestFacilities.nearest_shelter.distance_km} km away</p>
+                        <p className="text-sm text-gray-600">{nearestFacilities.nearest_shelter.available_capacity} beds available</p>
+                        <a 
+                          href={nearestFacilities.nearest_shelter.google_maps_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-600 hover:text-blue-700 text-sm font-medium"
+                        >
+                          🗺️ Get Directions
+                        </a>
+                      </div>
+                    </Popup>
+                  </Marker>
+                )}
+
+                {/* Nearest Hospital Marker */}
+                {nearestFacilities?.nearest_hospital && (
+                  <Marker 
+                    position={[nearestFacilities.nearest_hospital.latitude, nearestFacilities.nearest_hospital.longitude]}
+                    icon={L.divIcon({
+                      className: 'custom-div-icon',
+                      html: '<div style="background-color: #EF4444; width: 20px; height: 20px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 4px rgba(0,0,0,0.5);"></div>',
+                      iconSize: [20, 20],
+                      iconAnchor: [10, 10]
+                    })}
+                  >
+                    <Popup>
+                      <div className="text-center">
+                        <h3 className="font-semibold text-red-600">🏥 Nearest Hospital</h3>
+                        <p className="text-sm text-gray-600">{nearestFacilities.nearest_hospital.name}</p>
+                        <p className="text-sm text-gray-600">{nearestFacilities.nearest_hospital.distance_km} km away</p>
+                        <p className="text-sm text-gray-600">{nearestFacilities.nearest_hospital.available_beds} beds available</p>
+                        {nearestFacilities.nearest_hospital.available_icu > 0 && (
+                          <p className="text-sm text-gray-600">{nearestFacilities.nearest_hospital.available_icu} ICU available</p>
+                        )}
+                        <a 
+                          href={nearestFacilities.nearest_hospital.google_maps_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-600 hover:text-blue-700 text-sm font-medium"
+                        >
+                          🗺️ Get Directions
+                        </a>
+                      </div>
+                    </Popup>
+                  </Marker>
+                )}
+              </MapContainer>
             </div>
           </div>
         </div>

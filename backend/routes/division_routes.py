@@ -4,15 +4,17 @@ from sqlalchemy import func
 from typing import List, Optional
 from database import get_db, Division, Organization, Staff, SOSRequest
 from models import DivisionCreate, DivisionUpdate, DivisionResponse
+from routes.auth_routes import require_roles
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 router = APIRouter()
 
 @router.post("/", response_model=DivisionResponse)
 async def create_division(
     division_data: DivisionCreate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(require_roles("admin", "responder")),
 ):
     """Create a new division"""
     try:
@@ -70,7 +72,8 @@ async def get_division(division_id: str, db: Session = Depends(get_db)):
 async def update_division(
     division_id: str,
     division_update: DivisionUpdate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(require_roles("admin", "responder")),
 ):
     """Update division information"""
     division = db.query(Division).filter(Division.id == division_id).first()
@@ -95,7 +98,11 @@ async def update_division(
     return division
 
 @router.delete("/{division_id}")
-async def delete_division(division_id: str, db: Session = Depends(get_db)):
+async def delete_division(
+    division_id: str,
+    db: Session = Depends(get_db),
+    current_user = Depends(require_roles("admin")),
+):
     """Delete a division (admin only)"""
     division = db.query(Division).filter(Division.id == division_id).first()
     if not division:
@@ -135,7 +142,7 @@ async def get_division_workload(division_id: str, db: Session = Depends(get_db))
     ).scalar()
     
     # Get completed tickets this week
-    week_ago = datetime.utcnow() - datetime.timedelta(days=7)
+    week_ago = datetime.utcnow() - timedelta(days=7)
     completed_week = db.query(func.count(SOSRequest.id)).filter(
         SOSRequest.assigned_division == division_id,
         SOSRequest.status == "Done",
@@ -155,7 +162,7 @@ async def get_division_workload(division_id: str, db: Session = Depends(get_db))
         "utilization_rate": round(division.current_load / division.capacity * 100, 2) if division.capacity > 0 else 0
     }
 
-@router.get("/stats/overview")
+@router.get("/overview/stats")
 async def get_divisions_overview(db: Session = Depends(get_db)):
     """Get overview statistics for all divisions"""
     try:

@@ -1,9 +1,10 @@
 import os
+from pathlib import Path
 
 import uvicorn
 from database import Base, engine
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -13,6 +14,7 @@ from routes import dashboard_routes
 from routes import hospital_routes
 from routes import shelter_routes
 from routes import sos_routes
+from routes import resource_routes
 from routes import organization_routes
 from routes import staff_routes
 from routes import division_routes
@@ -28,14 +30,14 @@ except:
 # Try to create database tables
 try:
     Base.metadata.create_all(bind=engine)
-    print("✅ Database tables created successfully")
+    print("Database tables created successfully")
 except Exception as e:
-    print(f"⚠️  Warning: Could not create database tables: {e}")
+    print(f"Warning: Could not create database tables: {e}")
     print("   The API will start but database operations will fail")
 
 app = FastAPI(
     title="Disaster Response Dashboard API",
-    description="API for managing disaster response operations in Maharashtra",
+    description="API for managing disaster response operations in Telangana",
     version="1.0.0"
 )
 
@@ -49,19 +51,24 @@ app.add_middleware(
 )
 
 # Mount static files
-app.mount("/static", StaticFiles(directory="static"), name="static")
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # Include routes
-app.include_router(sos_routes.router, prefix="/api/sos", tags=["SOS"])
-app.include_router(shelter_routes.router, prefix="/api/shelters", tags=["Shelters"])
-app.include_router(hospital_routes.router, prefix="/api/hospitals", tags=["Hospitals"])
+auth_dep = [Depends(auth_routes.get_current_user)]
+admin_dep = [Depends(auth_routes.require_roles("admin"))]
+
+app.include_router(sos_routes.router, prefix="/api/sos", tags=["SOS"], dependencies=auth_dep)
+app.include_router(shelter_routes.router, prefix="/api/shelters", tags=["Shelters"], dependencies=auth_dep)
+app.include_router(hospital_routes.router, prefix="/api/hospitals", tags=["Hospitals"], dependencies=auth_dep)
+app.include_router(resource_routes.router, prefix="/api/resources", tags=["Resources"], dependencies=auth_dep)
 app.include_router(auth_routes.router, prefix="/api/auth", tags=["Authentication"])
-app.include_router(dashboard_routes.router, prefix="/api/dashboard", tags=["Dashboard"])
-app.include_router(organization_routes.router, prefix="/api/organizations", tags=["Organizations"])
-app.include_router(staff_routes.router, prefix="/api/staff", tags=["Staff"])
-app.include_router(division_routes.router, prefix="/api/divisions", tags=["Divisions"])
-app.include_router(emergency_routes.router, prefix="/api/emergency", tags=["Emergency Response"])
-app.include_router(flood_detection_routes.router, prefix="/api/flood-detection", tags=["Flood Detection"])
+app.include_router(dashboard_routes.router, prefix="/api/dashboard", tags=["Dashboard"], dependencies=auth_dep)
+app.include_router(organization_routes.router, prefix="/api/organizations", tags=["Organizations"], dependencies=auth_dep)
+app.include_router(staff_routes.router, prefix="/api/staff", tags=["Staff"], dependencies=auth_dep)
+app.include_router(division_routes.router, prefix="/api/divisions", tags=["Divisions"], dependencies=auth_dep)
+app.include_router(emergency_routes.router, prefix="/api/emergency", tags=["Emergency Response"], dependencies=auth_dep)
+app.include_router(flood_detection_routes.router, prefix="/api/flood-detection", tags=["Flood Detection"], dependencies=admin_dep)
 
 @app.get("/")
 async def root():

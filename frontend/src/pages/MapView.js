@@ -1,33 +1,112 @@
 import React, { useState, useEffect } from 'react';
+import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
+import AnalysisPanel from '../components/FloodDetection';
+import DisasterAreasLayer from '../components/FloodAreasLayer';
+import L from 'leaflet';
 import { 
+  BarChart3, 
   Layers, 
-  Filter, 
+  Filter,
   Search,
-  MapPin,
+  AlertTriangle,
   Home,
   Activity,
-  AlertTriangle,
+  Info,
   X
 } from 'lucide-react';
-import MapView from 'react-map-gl';
-import 'mapbox-gl/dist/mapbox-gl.css';
+import 'leaflet/dist/leaflet.css';
 import axios from 'axios';
-import toast from 'react-hot-toast';
+import { toast } from 'react-hot-toast';
+import { useAuth } from '../contexts/AuthContext';
+
+// Fix for default markers in Leaflet
+delete L.Icon.Default.prototype._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: require('leaflet/dist/images/marker-icon-2x.png'),
+  iconUrl: require('leaflet/dist/images/marker-icon.png'),
+  shadowUrl: require('leaflet/dist/images/marker-shadow.png'),
+});
+
+// Custom marker icons
+const createCustomIcon = (color, size = 25) => {
+  return L.divIcon({
+    html: `<div style="
+      width: ${size}px; 
+      height: ${size}px; 
+      background-color: ${color}; 
+      border: 2px solid white; 
+      border-radius: 50%; 
+      box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-weight: bold;
+      font-size: 12px;
+    "></div>`,
+    className: 'custom-marker',
+    iconSize: [size, size],
+    iconAnchor: [size/2, size/2]
+  });
+};
+
+// Component to handle map view state changes
+const MapController = ({ center, zoom, onMove }) => {
+  const map = useMap();
+  
+  useEffect(() => {
+    map.setView(center, zoom);
+  }, [center, zoom, map]);
+
+  useEffect(() => {
+    const handleMove = () => {
+      const center = map.getCenter();
+      const zoom = map.getZoom();
+      onMove({ longitude: center.lng, latitude: center.lat, zoom });
+    };
+
+    map.on('moveend', handleMove);
+    return () => {
+      map.off('moveend', handleMove);
+    };
+  }, [map, onMove]);
+
+  return null;
+};
 
 const MapViewPage = () => {
+  const { user } = useAuth();
+  const canUseSatelliteAnalysis = user?.role === 'admin';
   const [viewState, setViewState] = useState({
-    longitude: 75.0, // Central Maharashtra
-    latitude: 19.0,
+    longitude: 78.4867, // Hyderabad, Telangana
+    latitude: 17.3850,
     zoom: 7
   });
   const [sosData, setSosData] = useState([]);
   const [shelters, setShelters] = useState([]);
   const [hospitals, setHospitals] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [floodData, setFloodData] = useState(null);
+  const [earthquakeData, setEarthquakeData] = useState(null);
   const [layers, setLayers] = useState({
     sos: true,
     shelters: true,
-    hospitals: true
+    hospitals: true,
+    flood: false,
+    earthquake: false,
+    // Satellite layers for flood analysis
+    pre_flood_vh: false,
+    pre_flood_vv: false,
+    post_flood_vh: false,
+    post_flood_vv: false,
+    vh_change: false,
+    vv_change: false,
+    permanent_water: false,
+    flooded_areas: false,
+    // Satellite layers for earthquake analysis
+    pre_quake: false,
+    post_quake: false,
+    ground_deformation: false
   });
   const [filters, setFilters] = useState({
     status: '',
@@ -36,8 +115,6 @@ const MapViewPage = () => {
   });
   const [selectedMarker, setSelectedMarker] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
-
-  const MAPBOX_TOKEN = process.env.REACT_APP_MAPBOX_TOKEN || 'pk.eyJ1IjoiZXhhbXBsZSIsImEiOiJjbGV4YW1wbGUifQ.example';
 
   useEffect(() => {
     fetchMapData();
@@ -74,18 +151,36 @@ const MapViewPage = () => {
     return colors[priority] || colors[1];
   };
 
-  const getStatusColor = (status) => {
-    const colors = {
-      'Pending': '#f59e0b',
-      'In Progress': '#3b82f6',
-      'Done': '#22c55e',
-      'Cancelled': '#6b7280'
-    };
-    return colors[status] || colors['Pending'];
-  };
-
   const handleMarkerClick = (marker) => {
     setSelectedMarker(marker);
+  };
+
+  const handleFloodDataUpdate = (data) => {
+    setFloodData(data);
+    setEarthquakeData(null); // Clear earthquake data when flood analysis is run
+    
+    // Only update map view if data is not null
+    if (data && data.location) {
+      setViewState({
+        latitude: data.location.latitude,
+        longitude: data.location.longitude,
+        zoom: 10
+      });
+    }
+  };
+
+  const handleEarthquakeDataUpdate = (data) => {
+    setEarthquakeData(data);
+    setFloodData(null); // Clear flood data when earthquake analysis is run
+    
+    // Only update map view if data is not null
+    if (data && data.location) {
+      setViewState({
+        latitude: data.location.latitude,
+        longitude: data.location.longitude,
+        zoom: 10
+      });
+    }
   };
 
   const closePopup = () => {
@@ -98,279 +193,604 @@ const MapViewPage = () => {
     if (filters.priority && sos.priority !== parseInt(filters.priority)) return false;
     if (searchTerm) {
       const search = searchTerm.toLowerCase();
-      return sos.place.toLowerCase().includes(search) || 
-             sos.category.toLowerCase().includes(search);
+      return (
+        sos.place?.toLowerCase().includes(search) ||
+        sos.category?.toLowerCase().includes(search) ||
+        sos.text?.toLowerCase().includes(search)
+      );
     }
     return true;
   });
 
-  const categories = [...new Set(sosData.map(sos => sos.category))];
+  const filteredShelters = shelters.filter(shelter => {
+    if (searchTerm) {
+      const search = searchTerm.toLowerCase();
+      return (
+        shelter.name?.toLowerCase().includes(search) ||
+        shelter.address?.toLowerCase().includes(search)
+      );
+    }
+    return true;
+  });
+
+  const filteredHospitals = hospitals.filter(hospital => {
+    if (searchTerm) {
+      const search = searchTerm.toLowerCase();
+      return (
+        hospital.name?.toLowerCase().includes(search) ||
+        hospital.address?.toLowerCase().includes(search)
+      );
+    }
+    return true;
+  });
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-full">
-        <div className="spinner"></div>
+      <div className="flex items-center justify-center h-screen">
+        <div className="animate-spin rounded-full h-32 w-32 border-b-2 border-blue-600"></div>
       </div>
     );
   }
 
   return (
-    <div className="h-full relative">
-      {/* Map Controls */}
-      <div className="absolute top-4 left-4 z-10 space-y-3">
-        {/* Search */}
-        <div className="bg-white rounded-lg shadow-lg p-3 w-80">
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
-            <input
-              type="text"
-              placeholder="Search locations..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            />
+    <div className="flex h-screen bg-gray-50">
+      {/* Sidebar */}
+      <div className="w-80 bg-white shadow-lg border-r border-gray-200 flex flex-col">
+        {/* Header */}
+        {/* Search and Filters */}
+        <div className="p-4 border-b border-gray-200 bg-gray-50">
+          <div className="space-y-3">
+            {/* Search */}
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
+              <input
+                type="text"
+                placeholder="Search locations..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+            </div>
+
+            {/* Quick Stats */}
+            <div className="grid grid-cols-2 gap-2">
+              <div className="bg-white p-3 rounded-lg border border-gray-200">
+                <div className="flex items-center space-x-2">
+                  <AlertTriangle className="w-4 h-4 text-red-500" />
+                  <span className="text-sm font-medium text-gray-700">SOS</span>
+                </div>
+                <div className="text-lg font-bold text-red-600">{filteredSosData.length}</div>
+              </div>
+              <div className="bg-white p-3 rounded-lg border border-gray-200">
+                <div className="flex items-center space-x-2">
+                  <Home className="w-4 h-4 text-green-500" />
+                  <span className="text-sm font-medium text-gray-700">Shelters</span>
+                </div>
+                <div className="text-lg font-bold text-green-600">{filteredShelters.length}</div>
+              </div>
+            </div>
           </div>
         </div>
 
         {/* Layer Controls */}
-        <div className="bg-white rounded-lg shadow-lg p-3">
-          <h3 className="font-medium text-gray-900 mb-3 flex items-center space-x-2">
-            <Layers className="w-4 h-4" />
-            <span>Layers</span>
-          </h3>
-          <div className="space-y-2">
-            <label className="flex items-center space-x-2">
-              <input
-                type="checkbox"
-                checked={layers.sos}
-                onChange={(e) => setLayers({ ...layers, sos: e.target.checked })}
-                className="rounded text-blue-600"
-              />
-              <span className="text-sm">SOS Requests</span>
-            </label>
-            <label className="flex items-center space-x-2">
-              <input
-                type="checkbox"
-                checked={layers.shelters}
-                onChange={(e) => setLayers({ ...layers, shelters: e.target.checked })}
-                className="rounded text-blue-600"
-              />
-              <span className="text-sm">Shelters</span>
-            </label>
-            <label className="flex items-center space-x-2">
-              <input
-                type="checkbox"
-                checked={layers.hospitals}
-                onChange={(e) => setLayers({ ...layers, hospitals: e.target.checked })}
-                className="rounded text-blue-600"
-              />
-              <span className="text-sm">Hospitals</span>
-            </label>
-          </div>
-        </div>
+        <div className="flex-1 p-4 overflow-y-auto">
+          <div className="space-y-4">
+            {/* Basic Layers */}
+            <div className="bg-white rounded-lg border border-gray-200 p-4">
+              <h3 className="font-semibold text-gray-900 mb-3 flex items-center space-x-2">
+                <Layers className="w-4 h-4" />
+                <span>Map Layers</span>
+              </h3>
+              
+              <div className="space-y-2">
+                <label className="flex items-center space-x-3 p-2 rounded-lg hover:bg-gray-50 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={layers.sos}
+                    onChange={(e) => setLayers({...layers, sos: e.target.checked})}
+                    className="rounded border-gray-300 text-red-500 focus:ring-red-500"
+                  />
+                  <AlertTriangle className="w-4 h-4 text-red-500" />
+                  <span className="text-sm font-medium">SOS Requests</span>
+                  <span className="ml-auto text-xs text-gray-500 bg-red-100 text-red-700 px-2 py-1 rounded-full">
+                    {filteredSosData.length}
+                  </span>
+                </label>
+                
+                <label className="flex items-center space-x-3 p-2 rounded-lg hover:bg-gray-50 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={layers.shelters}
+                    onChange={(e) => setLayers({...layers, shelters: e.target.checked})}
+                    className="rounded border-gray-300 text-green-500 focus:ring-green-500"
+                  />
+                  <Home className="w-4 h-4 text-green-500" />
+                  <span className="text-sm font-medium">Shelters</span>
+                  <span className="ml-auto text-xs text-gray-500 bg-green-100 text-green-700 px-2 py-1 rounded-full">
+                    {filteredShelters.length}
+                  </span>
+                </label>
+                
+                <label className="flex items-center space-x-3 p-2 rounded-lg hover:bg-gray-50 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={layers.hospitals}
+                    onChange={(e) => setLayers({...layers, hospitals: e.target.checked})}
+                    className="rounded border-gray-300 text-blue-500 focus:ring-blue-500"
+                  />
+                  <Activity className="w-4 h-4 text-blue-500" />
+                  <span className="text-sm font-medium">Hospitals</span>
+                  <span className="ml-auto text-xs text-gray-500 bg-blue-100 text-blue-700 px-2 py-1 rounded-full">
+                    {filteredHospitals.length}
+                  </span>
+                </label>
+              </div>
+            </div>
 
-        {/* Filters */}
-        <div className="bg-white rounded-lg shadow-lg p-3">
-          <h3 className="font-medium text-gray-900 mb-3 flex items-center space-x-2">
-            <Filter className="w-4 h-4" />
-            <span>Filters</span>
-          </h3>
-          <div className="space-y-2">
-            <select
-              value={filters.status}
-              onChange={(e) => setFilters({ ...filters, status: e.target.value })}
-              className="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500"
-            >
-              <option value="">All Status</option>
-              <option value="Pending">Pending</option>
-              <option value="In Progress">In Progress</option>
-              <option value="Done">Done</option>
-            </select>
-            
-            <select
-              value={filters.category}
-              onChange={(e) => setFilters({ ...filters, category: e.target.value })}
-              className="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500"
-            >
-              <option value="">All Categories</option>
-              {categories.map(category => (
-                <option key={category} value={category}>{category}</option>
-              ))}
-            </select>
-            
-            <select
-              value={filters.priority}
-              onChange={(e) => setFilters({ ...filters, priority: e.target.value })}
-              className="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500"
-            >
-              <option value="">All Priorities</option>
-              <option value="1">Priority 1</option>
-              <option value="2">Priority 2</option>
-              <option value="3">Priority 3</option>
-              <option value="4">Priority 4</option>
-              <option value="5">Priority 5</option>
-            </select>
+            {/* Analysis Layers */}
+            {(floodData || earthquakeData) && (
+              <div className="bg-white rounded-lg border border-gray-200 p-4">
+                <h3 className="font-semibold text-gray-900 mb-3 flex items-center space-x-2">
+                  <BarChart3 className="w-4 h-4" />
+                  <span>Analysis Results</span>
+                </h3>
+                
+                <div className="space-y-3">
+                  {/* Flood Analysis */}
+                  {floodData && (
+                    <div className="space-y-2">
+                      <label className="flex items-center space-x-3 p-2 rounded-lg hover:bg-blue-50 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={layers.flood}
+                          onChange={(e) => setLayers({...layers, flood: e.target.checked})}
+                          className="rounded border-gray-300 text-blue-500 focus:ring-blue-500"
+                        />
+                        <div className="w-3 h-3 rounded-full bg-blue-500"></div>
+                        <span className="text-sm font-medium text-blue-700">🌊 Flood Detection</span>
+                      </label>
+                      
+                      {layers.flood && (
+                        <div className="ml-6 space-y-2">
+                          <div className="flex space-x-2">
+                            <button
+                              onClick={() => {
+                                const newLayers = {...layers};
+                                Object.keys(newLayers).forEach(key => {
+                                  if (key.startsWith('pre_flood_') || key.startsWith('post_flood_') || 
+                                      key.startsWith('vh_change') || key.startsWith('vv_change') || 
+                                      key === 'permanent_water' || key === 'flooded_areas') {
+                                    newLayers[key] = true;
+                                  }
+                                });
+                                setLayers(newLayers);
+                              }}
+                              className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200 transition-colors"
+                            >
+                              Show All
+                            </button>
+                            <button
+                              onClick={() => {
+                                const newLayers = {...layers};
+                                Object.keys(newLayers).forEach(key => {
+                                  if (key.startsWith('pre_flood_') || key.startsWith('post_flood_') || 
+                                      key.startsWith('vh_change') || key.startsWith('vv_change') || 
+                                      key === 'permanent_water' || key === 'flooded_areas') {
+                                    newLayers[key] = false;
+                                  }
+                                });
+                                setLayers(newLayers);
+                              }}
+                              className="text-xs bg-gray-100 text-gray-700 px-2 py-1 rounded hover:bg-gray-200 transition-colors"
+                            >
+                              Hide All
+                            </button>
+                          </div>
+                          
+                          {Object.entries(floodData.satellite_layers).map(([key, layer]) => (
+                            <label key={key} className="flex items-center space-x-2 text-xs">
+                              <input
+                                type="checkbox"
+                                checked={layers[key]}
+                                onChange={(e) => setLayers({...layers, [key]: e.target.checked})}
+                                className="rounded border-gray-300"
+                              />
+                              <span>{layer.name}</span>
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Earthquake Analysis */}
+                  {earthquakeData && (
+                    <div className="space-y-2">
+                      <label className="flex items-center space-x-3 p-2 rounded-lg hover:bg-orange-50 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={layers.earthquake}
+                          onChange={(e) => setLayers({...layers, earthquake: e.target.checked})}
+                          className="rounded border-gray-300 text-orange-500 focus:ring-orange-500"
+                        />
+                        <div className="w-3 h-3 rounded-full bg-orange-500"></div>
+                        <span className="text-sm font-medium text-orange-700">🌋 Earthquake Deformation</span>
+                      </label>
+                      
+                      {layers.earthquake && (
+                        <div className="ml-6 space-y-2">
+                          <div className="flex space-x-2">
+                            <button
+                              onClick={() => {
+                                const newLayers = {...layers};
+                                Object.keys(newLayers).forEach(key => {
+                                  if (key.startsWith('pre_quake') || key.startsWith('post_quake') || 
+                                      key === 'ground_deformation') {
+                                    newLayers[key] = true;
+                                  }
+                                });
+                                setLayers(newLayers);
+                              }}
+                              className="text-xs bg-orange-100 text-orange-700 px-2 py-1 rounded hover:bg-orange-200 transition-colors"
+                            >
+                              Show All
+                            </button>
+                            <button
+                              onClick={() => {
+                                const newLayers = {...layers};
+                                Object.keys(newLayers).forEach(key => {
+                                  if (key.startsWith('pre_quake') || key.startsWith('post_quake') || 
+                                      key === 'ground_deformation') {
+                                    newLayers[key] = false;
+                                  }
+                                });
+                                setLayers(newLayers);
+                              }}
+                              className="text-xs bg-gray-100 text-gray-700 px-2 py-1 rounded hover:bg-gray-200 transition-colors"
+                            >
+                              Hide All
+                            </button>
+                          </div>
+                          
+                          {Object.entries(earthquakeData.satellite_layers).map(([key, layer]) => (
+                            <label key={key} className="flex items-center space-x-2 text-xs">
+                              <input
+                                type="checkbox"
+                                checked={layers[key]}
+                                onChange={(e) => setLayers({...layers, [key]: e.target.checked})}
+                                className="rounded border-gray-300"
+                              />
+                              <span>{layer.name}</span>
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Filters */}
+            <div className="bg-white rounded-lg border border-gray-200 p-4">
+              <h3 className="font-semibold text-gray-900 mb-3 flex items-center space-x-2">
+                <Filter className="w-4 h-4" />
+                <span>Filters</span>
+              </h3>
+              
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Priority</label>
+                  <select
+                    value={filters.priority}
+                    onChange={(e) => setFilters({...filters, priority: e.target.value})}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  >
+                    <option value="">All Priorities</option>
+                    <option value="1">Priority 1</option>
+                    <option value="2">Priority 2</option>
+                    <option value="3">Priority 3</option>
+                    <option value="4">Priority 4</option>
+                    <option value="5">Priority 5</option>
+                  </select>
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Status</label>
+                  <select
+                    value={filters.status}
+                    onChange={(e) => setFilters({...filters, status: e.target.value})}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  >
+                    <option value="">All Status</option>
+                    <option value="Pending">Pending</option>
+                    <option value="Pending Assignment">Pending Assignment</option>
+                    <option value="In Progress">In Progress</option>
+                    <option value="Done">Done</option>
+                    <option value="Cancelled">Cancelled</option>
+                  </select>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
 
-      {/* Map */}
-      <MapView
-        {...viewState}
-        onMove={evt => setViewState(evt.viewState)}
-        mapboxAccessToken={MAPBOX_TOKEN}
-        style={{ width: '100%', height: '100%' }}
-        mapStyle="mapbox://styles/mapbox/streets-v11"
-      >
-        {/* SOS Markers */}
-        {layers.sos && filteredSosData.map((sos) => (
-          <div
-            key={sos.id}
-            style={{
-              position: 'absolute',
-              left: `${((sos.longitude + 180) / 360) * 100}%`,
-              top: `${((90 - sos.latitude) / 180) * 100}%`,
-              transform: 'translate(-50%, -50%)',
-              cursor: 'pointer'
-            }}
-            onClick={() => handleMarkerClick({ type: 'sos', data: sos })}
-          >
-            <div
-              className="w-6 h-6 rounded-full border-2 border-white shadow-lg animate-pulse"
-              style={{ backgroundColor: getPriorityColor(sos.priority) }}
-            ></div>
-          </div>
-        ))}
+      {/* Main Map Area */}
+      <div className="flex-1 relative">
+        {/* Map */}
+        <MapContainer
+          center={[viewState.latitude, viewState.longitude]}
+          zoom={viewState.zoom}
+          style={{ width: '100%', height: '100%' }}
+          className="h-full"
+        >
+          <MapController 
+            center={[viewState.latitude, viewState.longitude]} 
+            zoom={viewState.zoom}
+            onMove={setViewState}
+          />
+          
+          <TileLayer
+            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+          />
 
-        {/* Shelter Markers */}
-        {layers.shelters && shelters.map((shelter) => (
-          <div
-            key={shelter.id}
-            style={{
-              position: 'absolute',
-              left: `${((shelter.longitude + 180) / 360) * 100}%`,
-              top: `${((90 - shelter.latitude) / 180) * 100}%`,
-              transform: 'translate(-50%, -50%)',
-              cursor: 'pointer'
-            }}
-            onClick={() => handleMarkerClick({ type: 'shelter', data: shelter })}
-          >
-            <div className="w-5 h-5 bg-green-500 rounded-full border-2 border-white shadow-lg"></div>
-          </div>
-        ))}
+          {/* Disaster Analysis Layer */}
+          <DisasterAreasLayer 
+            floodData={floodData} 
+            earthquakeData={earthquakeData}
+            isVisible={layers.flood || layers.earthquake}
+            layerVisibility={layers}
+          />
 
-        {/* Hospital Markers */}
-        {layers.hospitals && hospitals.map((hospital) => (
-          <div
-            key={hospital.id}
-            style={{
-              position: 'absolute',
-              left: `${((hospital.longitude + 180) / 360) * 100}%`,
-              top: `${((90 - hospital.latitude) / 180) * 100}%`,
-              transform: 'translate(-50%, -50%)',
-              cursor: 'pointer'
-            }}
-            onClick={() => handleMarkerClick({ type: 'hospital', data: hospital })}
-          >
-            <div className="w-5 h-5 bg-blue-500 rounded-full border-2 border-white shadow-lg"></div>
-          </div>
-        ))}
-      </MapView>
-
-      {/* Marker Popup */}
-      {selectedMarker && (
-        <div className="absolute top-4 right-4 z-10 bg-white rounded-lg shadow-lg p-4 max-w-sm">
-          <div className="flex items-start justify-between mb-3">
-            <div className="flex items-center space-x-2">
-              {selectedMarker.type === 'sos' && <AlertTriangle className="w-5 h-5 text-red-500" />}
-              {selectedMarker.type === 'shelter' && <Home className="w-5 h-5 text-green-500" />}
-              {selectedMarker.type === 'hospital' && <Activity className="w-5 h-5 text-blue-500" />}
-              <h3 className="font-semibold text-gray-900">
-                {selectedMarker.type === 'sos' ? 'SOS Request' : 
-                 selectedMarker.type === 'shelter' ? 'Shelter' : 'Hospital'}
-              </h3>
-            </div>
-            <button
-              onClick={closePopup}
-              className="text-gray-400 hover:text-gray-600"
+          {/* SOS Markers */}
+          {layers.sos && filteredSosData.map((sos) => (
+            <Marker
+              key={sos.id}
+              position={[sos.latitude, sos.longitude]}
+              icon={createCustomIcon(getPriorityColor(sos.priority), 20)}
+              eventHandlers={{
+                click: () => handleMarkerClick({ type: 'sos', data: sos })
+              }}
             >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
+              <Popup>
+                <div className="text-center">
+                  <h3 className="font-semibold text-red-600">SOS Request</h3>
+                  <p className="text-sm text-gray-600">{sos.category}</p>
+                  <p className="text-sm text-gray-600">{sos.place}</p>
+                  <p className="text-sm text-gray-600">Priority: {sos.priority}</p>
+                  <p className="text-sm text-gray-600">Status: {sos.status}</p>
+                </div>
+              </Popup>
+            </Marker>
+          ))}
 
-          {selectedMarker.type === 'sos' && (
-            <div className="space-y-2">
-              <p className="text-sm text-gray-600">
-                <span className="font-medium">Category:</span> {selectedMarker.data.category}
-              </p>
-              <p className="text-sm text-gray-600">
-                <span className="font-medium">Location:</span> {selectedMarker.data.place}
-              </p>
-              <p className="text-sm text-gray-600">
-                <span className="font-medium">People:</span> {selectedMarker.data.people}
-              </p>
-              <p className="text-sm text-gray-600">
-                <span className="font-medium">Priority:</span> {selectedMarker.data.priority}
-              </p>
-              <p className="text-sm text-gray-600">
-                <span className="font-medium">Status:</span> {selectedMarker.data.status}
-              </p>
+          {/* Shelter Markers */}
+          {layers.shelters && filteredShelters.map((shelter) => (
+            <Marker
+              key={shelter.id}
+              position={[shelter.latitude, shelter.longitude]}
+              icon={createCustomIcon('#22c55e', 18)}
+              eventHandlers={{
+                click: () => handleMarkerClick({ type: 'shelter', data: shelter })
+              }}
+            >
+              <Popup>
+                <div className="text-center">
+                  <h3 className="font-semibold text-green-600">Shelter</h3>
+                  <p className="text-sm text-gray-600">{shelter.name}</p>
+                  <p className="text-sm text-gray-600">{shelter.address}</p>
+                  <p className="text-sm text-gray-600">Capacity: {shelter.capacity}</p>
+                  <p className="text-sm text-gray-600">Available: {shelter.capacity - shelter.current_occupancy}</p>
+                </div>
+              </Popup>
+            </Marker>
+          ))}
+
+          {/* Hospital Markers */}
+          {layers.hospitals && filteredHospitals.map((hospital) => (
+            <Marker
+              key={hospital.id}
+              position={[hospital.latitude, hospital.longitude]}
+              icon={createCustomIcon('#3b82f6', 18)}
+              eventHandlers={{
+                click: () => handleMarkerClick({ type: 'hospital', data: hospital })
+              }}
+            >
+              <Popup>
+                <div className="text-center">
+                  <h3 className="font-semibold text-blue-600">Hospital</h3>
+                  <p className="text-sm text-gray-600">{hospital.name}</p>
+                  <p className="text-sm text-gray-600">{hospital.address}</p>
+                  <p className="text-sm text-gray-600">Available Beds: {hospital.available_beds}</p>
+                  <p className="text-sm text-gray-600">ICU Beds: {hospital.available_icu}</p>
+                </div>
+              </Popup>
+            </Marker>
+          ))}
+        </MapContainer>
+
+        {/* Analysis Panel */}
+        {canUseSatelliteAnalysis ? (
+          <AnalysisPanel 
+            onFloodDataUpdate={handleFloodDataUpdate}
+            onEarthquakeDataUpdate={handleEarthquakeDataUpdate}
+          />
+        ) : (
+          <div className="absolute top-4 right-4 z-10 bg-white/95 border border-amber-200 text-amber-800 px-3 py-2 rounded-lg shadow">
+            Satellite analysis is admin-only.
+          </div>
+        )}
+
+        {/* Analysis Status */}
+        {(floodData || earthquakeData) && (
+          <div className="absolute top-4 right-4 z-10 bg-white rounded-xl shadow-xl border border-gray-200 p-4 max-w-sm">
+            <div className="flex items-start justify-between mb-3">
+              <h4 className="font-semibold text-gray-900 flex items-center space-x-2">
+                <Info className="w-4 h-4" />
+                <span>Analysis Status</span>
+              </h4>
+              <button
+                onClick={() => {
+                  setFloodData(null);
+                  setEarthquakeData(null);
+                  // Reset layer visibility for analysis layers
+                  setLayers(prevLayers => {
+                    const newLayers = { ...prevLayers };
+                    // Clear flood-related layers
+                    newLayers.flood = false;
+                    Object.keys(newLayers).forEach(key => {
+                      if (key.startsWith('pre_flood_') || key.startsWith('post_flood_') || 
+                          key.startsWith('vh_change') || key.startsWith('vv_change') || 
+                          key === 'permanent_water' || key === 'flooded_areas') {
+                        newLayers[key] = false;
+                      }
+                    });
+                    // Clear earthquake-related layers
+                    newLayers.earthquake = false;
+                    Object.keys(newLayers).forEach(key => {
+                      if (key.startsWith('pre_quake') || key.startsWith('post_quake') || 
+                          key === 'ground_deformation') {
+                        newLayers[key] = false;
+                      }
+                    });
+                    return newLayers;
+                  });
+                }}
+                className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100"
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
-          )}
-
-          {selectedMarker.type === 'shelter' && (
-            <div className="space-y-2">
-              <p className="text-sm text-gray-600">
-                <span className="font-medium">Name:</span> {selectedMarker.data.name}
-              </p>
-              <p className="text-sm text-gray-600">
-                <span className="font-medium">Address:</span> {selectedMarker.data.address}
-              </p>
-              <p className="text-sm text-gray-600">
-                <span className="font-medium">Capacity:</span> {selectedMarker.data.capacity}
-              </p>
-              <p className="text-sm text-gray-600">
-                <span className="font-medium">Occupancy:</span> {selectedMarker.data.current_occupancy}
-              </p>
+            
+            <div className="space-y-3">
+              {floodData && (
+                <div className="bg-gradient-to-r from-blue-50 to-blue-100 p-3 rounded-lg border border-blue-200">
+                  <h5 className="font-semibold text-blue-800 mb-2 flex items-center space-x-2">
+                    <div className="w-2 h-2 rounded-full bg-blue-500"></div>
+                    <span>🌊 Flood Analysis</span>
+                  </h5>
+                  <div className="text-sm text-blue-700 space-y-1">
+                    <div><strong>Location:</strong> {floodData.location.latitude.toFixed(4)}, {floodData.location.longitude.toFixed(4)}</div>
+                    <div><strong>Radius:</strong> {floodData.location.radius_km} km</div>
+                    <div><strong>Date Range:</strong> {floodData.date_range.pre_flood} → {floodData.date_range.post_flood}</div>
+                    <div><strong>Analysis Date:</strong> {new Date(floodData.analysis_date).toLocaleDateString()}</div>
+                    <div className="font-semibold text-blue-800"><strong>Flood Area:</strong> {floodData.flood_statistics.flood_area_km2.toFixed(2)} km²</div>
+                  </div>
+                </div>
+              )}
+              
+              {earthquakeData && (
+                <div className="bg-gradient-to-r from-orange-50 to-orange-100 p-3 rounded-lg border border-orange-200">
+                  <h5 className="font-semibold text-orange-800 mb-2 flex items-center space-x-2">
+                    <div className="w-2 h-2 rounded-full bg-orange-500"></div>
+                    <span>🌋 Earthquake Analysis</span>
+                  </h5>
+                  <div className="text-sm text-orange-700 space-y-1">
+                    <div><strong>Location:</strong> {earthquakeData.location.latitude.toFixed(4)}, {earthquakeData.location.longitude.toFixed(4)}</div>
+                    <div><strong>Radius:</strong> {earthquakeData.location.radius_km} km</div>
+                    <div><strong>Date Range:</strong> {earthquakeData.date_range.pre_quake} → {earthquakeData.date_range.post_quake}</div>
+                    <div><strong>Analysis Date:</strong> {new Date(earthquakeData.analysis_date).toLocaleDateString()}</div>
+                  </div>
+                </div>
+              )}
             </div>
-          )}
+          </div>
+        )}
 
-          {selectedMarker.type === 'hospital' && (
-            <div className="space-y-2">
-              <p className="text-sm text-gray-600">
-                <span className="font-medium">Name:</span> {selectedMarker.data.name}
-              </p>
-              <p className="text-sm text-gray-600">
-                <span className="font-medium">Address:</span> {selectedMarker.data.address}
-              </p>
-              <p className="text-sm text-gray-600">
-                <span className="font-medium">Total Beds:</span> {selectedMarker.data.total_beds}
-              </p>
-              <p className="text-sm text-gray-600">
-                <span className="font-medium">Available:</span> {selectedMarker.data.available_beds}
-              </p>
+        {/* Marker Details Modal */}
+        {selectedMarker && (
+          <div className="absolute inset-0 bg-black bg-opacity-50 flex items-center justify-center z-20">
+            <div className="bg-white rounded-xl shadow-2xl max-w-md w-full mx-4 max-h-[80vh] overflow-y-auto">
+              <div className="p-6">
+                <div className="flex items-start justify-between mb-4">
+                  <div className="flex items-center space-x-3">
+                    {selectedMarker.type === 'sos' && <AlertTriangle className="w-6 h-6 text-red-500" />}
+                    {selectedMarker.type === 'shelter' && <Home className="w-6 h-6 text-green-500" />}
+                    {selectedMarker.type === 'hospital' && <Activity className="w-6 h-6 text-blue-500" />}
+                    <h3 className="text-lg font-semibold text-gray-900">
+                      {selectedMarker.type === 'sos' ? 'SOS Request' : 
+                       selectedMarker.type === 'shelter' ? 'Shelter' : 'Hospital'}
+                    </h3>
+                  </div>
+                  <button
+                    onClick={closePopup}
+                    className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+                
+                <div className="space-y-4">
+                  <div className="bg-gray-50 p-4 rounded-lg">
+                    <h4 className="font-medium text-gray-900 mb-2">{selectedMarker.data.name || selectedMarker.data.category}</h4>
+                    <p className="text-gray-600">{selectedMarker.data.address || selectedMarker.data.place}</p>
+                  </div>
+                  
+                  {selectedMarker.type === 'sos' && (
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="text-center p-3 bg-red-50 rounded-lg">
+                        <div className="text-sm text-gray-600">Priority</div>
+                        <div className="font-semibold text-red-600">{selectedMarker.data.priority}</div>
+                      </div>
+                      <div className="text-center p-3 bg-blue-50 rounded-lg">
+                        <div className="text-sm text-gray-600">Status</div>
+                        <div className="font-semibold text-blue-600">{selectedMarker.data.status}</div>
+                      </div>
+                    </div>
+                  )}
+                  
+                  {(selectedMarker.type === 'shelter' || selectedMarker.type === 'hospital') && (
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="text-center p-3 bg-green-50 rounded-lg">
+                        <div className="text-sm text-gray-600">Available</div>
+                        <div className="font-semibold text-green-600">
+                          {selectedMarker.type === 'shelter' 
+                            ? selectedMarker.data.capacity - selectedMarker.data.current_occupancy
+                            : selectedMarker.data.available_beds}
+                        </div>
+                      </div>
+                      <div className="text-center p-3 bg-blue-50 rounded-lg">
+                        <div className="text-sm text-gray-600">Total</div>
+                        <div className="font-semibold text-blue-600">
+                          {selectedMarker.type === 'shelter' 
+                            ? selectedMarker.data.capacity
+                            : selectedMarker.data.total_beds}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  
+                  <div className="flex space-x-2">
+                    <button
+                      onClick={() => {
+                        if (selectedMarker.type === 'sos') {
+                          window.location.href = '/tickets';
+                        } else {
+                          closePopup();
+                        }
+                      }}
+                      className="flex-1 bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition-colors"
+                    >
+                      View Details
+                    </button>
+                    <button
+                      onClick={() => {
+                        const lat = selectedMarker.data.latitude;
+                        const lon = selectedMarker.data.longitude;
+                        window.open(`https://www.google.com/maps/dir/?api=1&destination=${lat},${lon}`, '_blank');
+                      }}
+                      className="flex-1 bg-gray-100 text-gray-700 py-2 px-4 rounded-lg hover:bg-gray-200 transition-colors"
+                    >
+                      Get Directions
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
-          )}
-        </div>
-      )}
-
-      {/* Legend */}
-      <div className="absolute bottom-4 left-4 z-10 bg-white rounded-lg shadow-lg p-4">
-        <h3 className="font-medium text-gray-900 mb-3">Legend</h3>
-        <div className="space-y-2 text-sm">
-          <div className="flex items-center space-x-2">
-            <div className="w-4 h-4 bg-red-500 rounded-full"></div>
-            <span>High Priority SOS</span>
           </div>
-          <div className="flex items-center space-x-2">
-            <div className="w-4 h-4 bg-green-500 rounded-full"></div>
-            <span>Shelters</span>
-          </div>
-          <div className="flex items-center space-x-2">
-            <div className="w-4 h-4 bg-blue-500 rounded-full"></div>
-            <span>Hospitals</span>
-          </div>
-        </div>
+        )}
       </div>
     </div>
   );

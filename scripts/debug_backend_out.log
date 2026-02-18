@@ -1,0 +1,6 @@
+Database tables created successfully
+INFO:     127.0.0.1:63376 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63376 - "POST /api/auth/login HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63376 - "POST /api/sos/intake HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63376 - "GET /api/emergency/smart-assignment?sos_id=388d6ef9-782c-4174-b149-e4dfb3c25afe HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63376 - "POST /api/emergency/assign-emergency HTTP/1.1" 200 OK

@@ -4,7 +4,8 @@ sqlalchemy==2.0.23
 pydantic==2.5.0
 python-dotenv==1.0.0
 passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
 python-jose[cryptography]==3.3.0
 python-multipart==0.0.6
-earthengine-api==0.1.375
-geemap==0.29.8 
+# Optional for live Sentinel processing (fallback works without it):
+# earthengine-api

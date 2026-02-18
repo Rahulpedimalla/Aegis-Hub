@@ -4,6 +4,7 @@ from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
 import uuid
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
 # Load environment variables (optional)
@@ -12,8 +13,10 @@ try:
 except:
     pass
 
-# Database connection - Using SQLite instead of PostgreSQL
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./disaster_response.db")
+# Database connection - Using SQLite instead of PostgreSQL.
+# Pin default SQLite path to backend directory so cwd does not change DB target.
+DEFAULT_DB_PATH = Path(__file__).resolve().parent / "disaster_response.db"
+DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DEFAULT_DB_PATH.as_posix()}")
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
