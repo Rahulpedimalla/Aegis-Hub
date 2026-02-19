@@ -25,3 +25,16 @@ ENVIRONMENT=production
 # AI Assignment (Gemini)
 GEMINI_API_KEY=your-gemini-api-key
 GEMINI_MODEL=gemini-2.5-flash
+
+# Mobile AI Pipeline
+# If unset, backend dispatches to its own internal endpoint:
+#   {BASE_URL}/api/mobile/ticket-creation-endpoint
+MOBILE_TICKET_CREATION_ENDPOINT=
+MOBILE_TICKET_ENDPOINT_AUTH_TOKEN=
+MOBILE_DISPATCH_MAX_ATTEMPTS=6
+MOBILE_DISPATCH_INITIAL_BACKOFF_SECONDS=1.0
+
+# Gemini multimodal limits (bytes)
+GEMINI_MEDIA_MAX_FILES=2
+GEMINI_INLINE_MAX_BYTES=3000000
+GEMINI_AUDIO_MAX_INLINE_BYTES=5000000

@@ -20,6 +20,7 @@ from routes import staff_routes
 from routes import division_routes
 from routes import emergency_routes
 from routes import flood_detection_routes
+from routes import mobile_routes
 
 # Load environment variables (optional)
 try:
@@ -69,6 +70,7 @@ app.include_router(staff_routes.router, prefix="/api/staff", tags=["Staff"], dep
 app.include_router(division_routes.router, prefix="/api/divisions", tags=["Divisions"], dependencies=auth_dep)
 app.include_router(emergency_routes.router, prefix="/api/emergency", tags=["Emergency Response"], dependencies=auth_dep)
 app.include_router(flood_detection_routes.router, prefix="/api/flood-detection", tags=["Flood Detection"], dependencies=admin_dep)
+app.include_router(mobile_routes.router, prefix="/api/mobile", tags=["Mobile Intake"])
 
 @app.get("/")
 async def root():
