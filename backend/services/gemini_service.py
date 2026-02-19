@@ -1,6 +1,8 @@
 import json
 import os
 import re
+import base64
+import mimetypes
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional
@@ -222,3 +224,280 @@ def gemini_triage(
         }
 
     return None
+
+
+def _first_candidate_text(payload: Dict[str, Any]) -> Optional[str]:
+    candidates = payload.get("candidates") or []
+    if not candidates:
+        return None
+    parts = ((candidates[0].get("content") or {}).get("parts") or [])
+    if not parts:
+        return None
+    return str(parts[0].get("text", "")).strip() or None
+
+
+def _gemini_generate_text_from_parts(
+    parts: List[Dict[str, Any]],
+    timeout_seconds: int = 10,
+    max_output_tokens: int = 1024,
+    temperature: float = 0.2,
+) -> Optional[str]:
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return None
+
+    model_from_env = os.getenv("GEMINI_MODEL", DEFAULT_MODEL)
+    models_to_try = _model_candidates(api_key, model_from_env)
+    if not models_to_try:
+        models_to_try = [_normalize_model_name(model_from_env or DEFAULT_MODEL)]
+
+    contents = [{"parts": parts}]
+    generation_base = {
+        "temperature": temperature,
+        "maxOutputTokens": max_output_tokens,
+    }
+    body_variants = [
+        {
+            "contents": contents,
+            "generationConfig": {
+                **generation_base,
+                "thinkingConfig": {"thinkingBudget": 0},
+            },
+        },
+        {
+            "contents": contents,
+            "generationConfig": generation_base,
+        },
+    ]
+
+    for model in models_to_try:
+        payload = None
+        url = GEMINI_API_URL.format(model=model, key=api_key)
+        for body in body_variants:
+            req = urllib.request.Request(
+                url=url,
+                data=json.dumps(body).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=timeout_seconds) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                break
+            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError):
+                payload = None
+                continue
+
+        if not payload:
+            continue
+        text = _first_candidate_text(payload)
+        if text:
+            return text
+
+    return None
+
+
+def gemini_structured_incident_analysis(
+    context_text: str,
+    detected_categories: List[str],
+    timeout_seconds: int = 10,
+) -> Optional[Dict[str, Any]]:
+    prompt = (
+        "You are an emergency incident analysis model. "
+        "Return STRICT JSON only with keys: "
+        "incident_type (string), severity_score (0..1 number), concise_summary (<=180 chars), "
+        "people_estimate (integer >=1), weather_related (boolean), credibility_risk (0..1 number), confidence (0..1 number). "
+        "No markdown, no prose.\n"
+        f"detected_categories={detected_categories}\n"
+        f"context={context_text}\n"
+    )
+
+    raw = _gemini_generate_text_from_parts(
+        parts=[{"text": prompt}],
+        timeout_seconds=timeout_seconds,
+        max_output_tokens=700,
+        temperature=0.1,
+    )
+    parsed = _extract_json(raw or "")
+    if not parsed:
+        return None
+
+    try:
+        severity = float(parsed.get("severity_score", 0.5))
+    except Exception:
+        severity = 0.5
+    severity = max(0.0, min(1.0, severity))
+
+    try:
+        credibility_risk = float(parsed.get("credibility_risk", 0.3))
+    except Exception:
+        credibility_risk = 0.3
+    credibility_risk = max(0.0, min(1.0, credibility_risk))
+
+    try:
+        confidence = float(parsed.get("confidence", 0.6))
+    except Exception:
+        confidence = 0.6
+    confidence = max(0.0, min(1.0, confidence))
+
+    try:
+        people_estimate = int(parsed.get("people_estimate", 1))
+    except Exception:
+        people_estimate = 1
+    people_estimate = max(1, min(10000, people_estimate))
+
+    concise_summary = str(parsed.get("concise_summary", "")).strip()
+    if len(concise_summary) > 180:
+        concise_summary = concise_summary[:177] + "..."
+
+    return {
+        "incident_type": str(parsed.get("incident_type", "")).strip() or "General Emergency",
+        "severity_score": round(severity, 3),
+        "concise_summary": concise_summary,
+        "people_estimate": people_estimate,
+        "weather_related": bool(parsed.get("weather_related", False)),
+        "credibility_risk": round(credibility_risk, 3),
+        "confidence": round(confidence, 3),
+    }
+
+
+def gemini_summarize_incident(context_text: str, timeout_seconds: int = 8) -> Optional[str]:
+    prompt = (
+        "Summarize this emergency incident in one concise sentence under 180 characters. "
+        "Return plain text only.\n"
+        f"context={context_text}\n"
+    )
+    raw = _gemini_generate_text_from_parts(
+        parts=[{"text": prompt}],
+        timeout_seconds=timeout_seconds,
+        max_output_tokens=180,
+        temperature=0.1,
+    )
+    if not raw:
+        return None
+    line = " ".join(raw.split())
+    if len(line) > 180:
+        line = line[:177] + "..."
+    return line
+
+
+def gemini_multimodal_media_insight(
+    media_paths: List[str],
+    context_hint: str = "",
+    timeout_seconds: int = 10,
+) -> Optional[str]:
+    if not media_paths:
+        return None
+
+    max_files = max(1, int(os.getenv("GEMINI_MEDIA_MAX_FILES", "2")))
+    max_inline_bytes = max(100000, int(os.getenv("GEMINI_INLINE_MAX_BYTES", "3000000")))
+
+    parts: List[Dict[str, Any]] = [
+        {
+            "text": (
+                "Analyze attached emergency media and return a short plain-text report with: "
+                "visible hazards, likely incident type clues, visible people estimate hints. "
+                f"Context hint: {context_hint}"
+            )
+        }
+    ]
+
+    attached = 0
+    for path in media_paths[:max_files]:
+        try:
+            with open(path, "rb") as handle:
+                blob = handle.read(max_inline_bytes + 1)
+            if len(blob) > max_inline_bytes:
+                continue
+            mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+            parts.append(
+                {
+                    "inlineData": {
+                        "mimeType": mime,
+                        "data": base64.b64encode(blob).decode("utf-8"),
+                    }
+                }
+            )
+            attached += 1
+        except Exception:
+            continue
+
+    if attached == 0:
+        return None
+
+    raw = _gemini_generate_text_from_parts(
+        parts=parts,
+        timeout_seconds=timeout_seconds,
+        max_output_tokens=500,
+        temperature=0.2,
+    )
+    if not raw:
+        return None
+    return " ".join(raw.split())
+
+
+def gemini_transcribe_audio(audio_path: str, language_hint: str = "en", timeout_seconds: int = 12) -> Optional[str]:
+    max_inline_bytes = max(100000, int(os.getenv("GEMINI_AUDIO_MAX_INLINE_BYTES", "5000000")))
+    try:
+        with open(audio_path, "rb") as handle:
+            blob = handle.read(max_inline_bytes + 1)
+    except Exception:
+        return None
+
+    if len(blob) > max_inline_bytes:
+        return None
+
+    mime = mimetypes.guess_type(audio_path)[0] or "audio/m4a"
+    parts = [
+        {
+            "text": (
+                "Transcribe this emergency audio to plain text exactly as spoken. "
+                f"Language hint: {language_hint}. "
+                "Return plain text only."
+            )
+        },
+        {
+            "inlineData": {
+                "mimeType": mime,
+                "data": base64.b64encode(blob).decode("utf-8"),
+            }
+        },
+    ]
+
+    raw = _gemini_generate_text_from_parts(
+        parts=parts,
+        timeout_seconds=timeout_seconds,
+        max_output_tokens=1000,
+        temperature=0.0,
+    )
+    if not raw:
+        return None
+    return " ".join(raw.split())
+
+
+def gemini_chat_followup_response(
+    incident_summary: str,
+    recent_messages: List[Dict[str, str]],
+    latest_user_message: str,
+    timeout_seconds: int = 8,
+) -> Optional[str]:
+    condensed_history = "\n".join(
+        f"{msg.get('role', 'user')}: {msg.get('text', '')}" for msg in recent_messages[-8:]
+    )
+    prompt = (
+        "You are a disaster response assistant. "
+        "Return one concise actionable reply that includes safety guidance and one follow-up question. "
+        "Avoid medical/legal guarantees.\n"
+        f"incident_summary={incident_summary}\n"
+        f"chat_history=\n{condensed_history}\n"
+        f"user={latest_user_message}\n"
+    )
+    raw = _gemini_generate_text_from_parts(
+        parts=[{"text": prompt}],
+        timeout_seconds=timeout_seconds,
+        max_output_tokens=220,
+        temperature=0.3,
+    )
+    if not raw:
+        return None
+    return " ".join(raw.split())

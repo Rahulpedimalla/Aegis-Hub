@@ -1,0 +1,11 @@
+{
+  "apiBaseUrl": "http://10.0.2.2:8001",
+  "ticketsEndpointPath": "/api/mobile/tickets",
+  "sosEndpointPath": "/api/mobile/tickets",
+  "chatEndpointPath": "/api/mobile/chat",
+  "sttProvider": "deepgram",
+  "ttsProvider": "cartesia",
+  "realtimeProvider": "openai_realtime",
+  "connectTimeoutMs": 15000,
+  "receiveTimeoutMs": 20000
+}

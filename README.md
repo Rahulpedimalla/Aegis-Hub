@@ -2,6 +2,10 @@
 
 End-to-end emergency response platform for Telangana with AI triage, smart ticket assignment, role-based dashboards, and geospatial flood monitoring.
 
+## Runbook
+
+For complete setup and execution of backend + frontend + mobile app with AI pipeline, see `IMPLEMENTATION.md`.
+
 ## What this project includes
 
 - FastAPI backend with authenticated APIs for SOS lifecycle and operational data.
@@ -131,3 +135,36 @@ Current system is API + dashboard complete. Mobile citizen application intake ca
 
 - `POST /api/sos/intake`
 - assignment and response endpoints under `/api/emergency`
+
+Additional mobile-optimized endpoints are now available:
+
+- `POST /api/mobile/tickets` (multipart `metadata` + `images[]` + `videos[]` + `audio_file`)
+- `POST /api/mobile/chat/{chat_session_id}/messages`
+
+## AI-powered mobile incident pipeline
+
+The backend now processes mobile incidents end-to-end before dispatching to ticket creation:
+
+- Multi-modal normalization (Voice/Image/Video/Text/Emergency SOS category detection).
+- AI analysis across modalities (transcript fallback, media insight, incident typing, summary).
+- Weather verification for weather-related incidents (Open-Meteo + cache fallback).
+- Nearby-ticket density checks and fraud/spam risk scoring.
+- Priority score + queue lane assignment (`p0`..`p3`).
+- Idempotent dispatch with retry and audit logs.
+
+Supporting endpoints:
+
+- `POST /api/mobile/tickets` -> analyze + verify + priority + dispatch.
+- `POST /api/mobile/ticket-creation-endpoint` -> target ticket creation endpoint (idempotent).
+- `POST /api/mobile/dispatch/retry-pending` -> retry queued/failed dispatches.
+- `GET /api/mobile/incidents/{incident_id}` -> incident processing and dispatch status.
+- `POST /api/mobile/ai/voice-agent` -> Gemini-powered voice/text follow-up response.
+
+Example ingest call:
+
+```bash
+curl -X POST "http://localhost:8001/api/mobile/tickets" \
+  -F "metadata={\"ticket_type\":\"SOS\",\"text\":\"Water rising rapidly near bridge\",\"latitude\":17.3850,\"longitude\":78.4867,\"timestamp\":\"2026-02-19T18:25:14Z\",\"ticket_id_client\":\"APP-DEMO-001\",\"metadata\":{\"idempotency_key\":\"APP-DEMO-001\"}}" \
+  -F "images=@sample.jpg" \
+  -F "audio_file=@sample.m4a"
+```

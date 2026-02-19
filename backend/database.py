@@ -185,3 +185,66 @@ class User(Base):
     division_id = Column(String, ForeignKey("divisions.id"), nullable=True)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class MobileIncident(Base):
+    __tablename__ = "mobile_incidents"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    external_id = Column(String, index=True)
+    idempotency_key = Column(String, unique=True, index=True, nullable=False)
+    chat_session_id = Column(String, unique=True, index=True, nullable=False)
+    ticket_type = Column(String, nullable=False)  # SOS | Normal
+    detected_categories = Column(Text)  # JSON array
+    primary_category = Column(String, nullable=False)
+    incident_type = Column(String, nullable=False)
+    severity_score = Column(Float, default=0.0)  # 0..1
+    location_density_score = Column(Float, default=0.0)  # 0..1
+    weather_confirmation_score = Column(Float, default=0.5)  # 0..1
+    fraud_risk_score = Column(Float, default=0.0)  # 0..1
+    priority_score = Column(Integer, default=0)  # 0..100
+    nearby_ticket_count = Column(Integer, default=0)
+    latitude = Column(Float, nullable=False)
+    longitude = Column(Float, nullable=False)
+    event_timestamp = Column(DateTime, default=datetime.utcnow)
+    text = Column(Text)
+    voice_transcript = Column(Text)
+    description_summary = Column(Text)
+    device_id_hash = Column(String)
+    client_ip = Column(String)
+    media_manifest = Column(Text)  # JSON object of persisted media refs
+    normalized_payload = Column(Text)  # JSON canonical internal payload
+    verification_payload = Column(Text)  # JSON verification/fraud/weather details
+    dispatch_payload = Column(Text)  # JSON payload sent to ticket creation endpoint
+    dispatch_endpoint = Column(String)
+    dispatch_status = Column(String, default="Pending")  # Pending, Dispatched, Failed, Queued
+    dispatched_ticket_id = Column(String, nullable=True)
+    dispatch_error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class MobileDispatchAttempt(Base):
+    __tablename__ = "mobile_dispatch_attempts"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    incident_id = Column(String, ForeignKey("mobile_incidents.id"), nullable=False, index=True)
+    attempt_no = Column(Integer, nullable=False)
+    success = Column(Boolean, default=False)
+    http_status = Column(Integer, nullable=True)
+    latency_ms = Column(Integer, nullable=True)
+    response_body = Column(Text, nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TicketCreationRecord(Base):
+    __tablename__ = "ticket_creation_records"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    idempotency_key = Column(String, unique=True, index=True, nullable=False)
+    incident_id = Column(String, index=True)
+    ticket_id = Column(String, index=True)
+    payload = Column(Text)  # JSON payload received by ticket creation endpoint
+    status = Column(String, default="created")
+    created_at = Column(DateTime, default=datetime.utcnow)

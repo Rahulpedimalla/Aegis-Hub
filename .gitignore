@@ -1,12 +1,101 @@
-node_modules/
-frontend/build/
+# ------------------------------
+# OS / Editor
+# ------------------------------
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.tmp
+*.temp
+*.bak
+*.orig
 
-__pycache__/
-*.pyc
-*.pyo
+.idea/
+.vscode/
+*.iml
 
+# ------------------------------
+# Secrets / Environment
+# ------------------------------
 .env
+.env.*
+!.env.example
+!.env.sample
 backend/.env
 frontend/.env
+mobile_app/.env
 
-venv
+# ------------------------------
+# Python (backend)
+# ------------------------------
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+venv/
+.venv/
+ENV/
+env/
+
+# Local DB / runtime artifacts
+*.sqlite
+*.sqlite3
+*.db
+backend/*.db
+
+# ------------------------------
+# Node / frontend
+# ------------------------------
+node_modules/
+frontend/node_modules/
+frontend/build/
+frontend/.cache/
+frontend/.eslintcache
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ------------------------------
+# Flutter / Dart (mobile_app)
+# ------------------------------
+mobile_app/.dart_tool/
+mobile_app/.packages
+mobile_app/.flutter-plugins
+mobile_app/.flutter-plugins-dependencies
+mobile_app/.metadata
+mobile_app/build/
+mobile_app/.idea/
+
+# Generated platform tool files
+mobile_app/android/.gradle/
+mobile_app/android/local.properties
+mobile_app/android/**/GeneratedPluginRegistrant.java
+mobile_app/ios/Flutter/Flutter.podspec
+mobile_app/ios/Flutter/Generated.xcconfig
+mobile_app/ios/Flutter/flutter_export_environment.sh
+mobile_app/ios/Pods/
+mobile_app/macos/Flutter/ephemeral/
+mobile_app/windows/flutter/ephemeral/
+mobile_app/linux/flutter/ephemeral/
+
+# ------------------------------
+# Runtime logs / uploads
+# ------------------------------
+runtime_logs/
+logs/
+*.log
+scripts/*.log
+backend/static/mobile_uploads/
+
+# ------------------------------
+# Local SDK/tooling checked out in repo
+# ------------------------------
+flutter/
