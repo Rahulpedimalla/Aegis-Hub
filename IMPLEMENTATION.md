@@ -167,6 +167,7 @@ curl -X POST "http://localhost:8001/api/mobile/ai/voice-agent" \
 - `POST /api/mobile/tickets`
 - `POST /api/mobile/chat/{chat_session_id}/messages`
 - `POST /api/mobile/ai/voice-agent`
+- `POST /api/mobile/ai/transcribe`
 - `GET /api/mobile/incidents/{incident_id}`
 - `POST /api/mobile/dispatch/retry-pending`
 - `POST /api/mobile/ticket-creation-endpoint`

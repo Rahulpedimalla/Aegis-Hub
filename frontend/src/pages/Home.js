@@ -12,7 +12,7 @@ const Home = () => {
     {
       role: 'Responder',
       access: 'Operational access: tickets, emergency response, map, resources',
-      creds: 'responder, harish.rao, dr.sneha.reddy, kiran.kumar, madhavi.ch / responder123',
+      creds: 'all active responder usernames / responder123',
     },
     {
       role: 'Viewer',

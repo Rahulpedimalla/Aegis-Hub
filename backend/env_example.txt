@@ -26,6 +26,11 @@ ENVIRONMENT=production
 GEMINI_API_KEY=your-gemini-api-key
 GEMINI_MODEL=gemini-2.5-flash
 
+# Optional speech provider keys (for future direct provider integrations)
+DEEPGRAM_API_KEY=
+ELEVENLABS_API_KEY=
+CARTESIA_API_KEY=
+
 # Mobile AI Pipeline
 # If unset, backend dispatches to its own internal endpoint:
 #   {BASE_URL}/api/mobile/ticket-creation-endpoint

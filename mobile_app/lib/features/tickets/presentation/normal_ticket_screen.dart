@@ -27,6 +27,19 @@ class _NormalTicketScreenState extends ConsumerState<NormalTicketScreen> {
 
   @override
   Widget build(BuildContext context) {
+    ref.listen<String>(
+      normalTicketControllerProvider.select((state) => state.description),
+      (_, next) {
+        if (_descriptionController.text == next) {
+          return;
+        }
+        _descriptionController.value = TextEditingValue(
+          text: next,
+          selection: TextSelection.collapsed(offset: next.length),
+        );
+      },
+    );
+
     final state = ref.watch(normalTicketControllerProvider);
     final controller = ref.read(normalTicketControllerProvider.notifier);
 
@@ -101,12 +114,17 @@ class _NormalTicketScreenState extends ConsumerState<NormalTicketScreen> {
                 style: Theme.of(context).textTheme.titleSmall,
               ),
             if (state.images.isNotEmpty)
-              ...state.images.map(
-                (image) => ListTile(
+              ...state.images.asMap().entries.map(
+                (entry) => ListTile(
                   dense: true,
                   leading: const Icon(Icons.image),
-                  title: Text(image.fileName),
-                  subtitle: Text('${image.sizeBytes} bytes'),
+                  title: Text(entry.value.fileName),
+                  subtitle: Text('${entry.value.sizeBytes} bytes'),
+                  trailing: IconButton(
+                    onPressed: state.isSubmitting ? null : () => controller.removeImageAt(entry.key),
+                    icon: const Icon(Icons.delete_outline),
+                    tooltip: 'Remove image',
+                  ),
                 ),
               ),
             if (state.videos.isNotEmpty)
@@ -115,12 +133,17 @@ class _NormalTicketScreenState extends ConsumerState<NormalTicketScreen> {
                 style: Theme.of(context).textTheme.titleSmall,
               ),
             if (state.videos.isNotEmpty)
-              ...state.videos.map(
-                (video) => ListTile(
+              ...state.videos.asMap().entries.map(
+                (entry) => ListTile(
                   dense: true,
                   leading: const Icon(Icons.video_file),
-                  title: Text(video.fileName),
-                  subtitle: Text('${video.sizeBytes} bytes'),
+                  title: Text(entry.value.fileName),
+                  subtitle: Text('${entry.value.sizeBytes} bytes'),
+                  trailing: IconButton(
+                    onPressed: state.isSubmitting ? null : () => controller.removeVideoAt(entry.key),
+                    icon: const Icon(Icons.delete_outline),
+                    tooltip: 'Remove video',
+                  ),
                 ),
               ),
             if (state.voiceNote != null)
@@ -137,6 +160,14 @@ class _NormalTicketScreenState extends ConsumerState<NormalTicketScreen> {
                     onPressed: state.isSubmitting ? null : controller.clearVoiceNote,
                     icon: const Icon(Icons.delete_outline),
                   ),
+                ),
+              ),
+            if (state.isRecordingVoiceNote)
+              const Padding(
+                padding: EdgeInsets.only(bottom: 8),
+                child: Text(
+                  'Recording... it will auto-stop after you finish speaking.',
+                  style: TextStyle(fontSize: 12, color: Colors.black54),
                 ),
               ),
             const SizedBox(height: 16),

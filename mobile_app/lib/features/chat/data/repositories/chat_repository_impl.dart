@@ -23,11 +23,15 @@ class ChatRepositoryImpl implements ChatRepository {
   Future<ChatSendResult> sendVoiceMessage({
     required String chatSessionId,
     String? audioPath,
+    String? audioMimeType,
+    String? audioFileName,
     String? textHint,
   }) async {
     final result = await _apiClient.sendVoiceChatMessage(
       chatSessionId: chatSessionId,
       audioPath: audioPath,
+      audioMimeType: audioMimeType,
+      audioFileName: audioFileName,
       textHint: textHint,
     );
     return ChatSendResult(

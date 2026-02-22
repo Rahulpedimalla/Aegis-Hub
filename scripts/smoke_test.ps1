@@ -28,6 +28,12 @@ try {
     return $resp.access_token
   }
 
+  function ToUsername([string]$name) {
+    if (-not $name) { return "" }
+    $normalized = ($name.ToLower() -replace "[^a-z0-9]+", ".").Trim(".")
+    return $normalized
+  }
+
   $adminToken = Login "admin" "admin123"
   $responderToken = Login "responder" "responder123"
   $viewerToken = Login "viewer" "viewer123"
@@ -107,20 +113,35 @@ try {
     $staffAfterAssign = (Invoke-RestMethod -Uri "http://127.0.0.1:8001/api/staff/$staffId" -Method Get -Headers $responderHeaders).availability
   }
 
+  $actingResponderHeaders = $responderHeaders
+  if ($staffId) {
+    try {
+      $assignedStaff = Invoke-RestMethod -Uri "http://127.0.0.1:8001/api/staff/$staffId" -Method Get -Headers $responderHeaders
+      $assignedUsername = ToUsername $assignedStaff.name
+      if ($assignedUsername) {
+        $assignedToken = Login $assignedUsername "responder123"
+        $actingResponderHeaders = @{ Authorization = "Bearer $assignedToken" }
+      }
+    } catch {
+      # Fallback to default responder credentials.
+      $actingResponderHeaders = $responderHeaders
+    }
+  }
+
   $acceptBody = @{
     sos_id = $sosId
     organization_id = $orgId
     estimated_completion = (Get-Date).ToUniversalTime().AddHours(1).ToString("o")
   } | ConvertTo-Json
-  Invoke-RestMethod -Uri "http://127.0.0.1:8001/api/emergency/accept-assignment" -Method Post -Headers $responderHeaders -ContentType "application/json" -Body $acceptBody | Out-Null
+  Invoke-RestMethod -Uri "http://127.0.0.1:8001/api/emergency/accept-assignment" -Method Post -Headers $actingResponderHeaders -ContentType "application/json" -Body $acceptBody | Out-Null
 
-  $statusAfterAccept = (Invoke-RestMethod -Uri "http://127.0.0.1:8001/api/sos/$sosId" -Method Get -Headers $responderHeaders).status
+  $statusAfterAccept = (Invoke-RestMethod -Uri "http://127.0.0.1:8001/api/sos/$sosId" -Method Get -Headers $actingResponderHeaders).status
 
   $completeBody = @{
     sos_id = $sosId
     resolution_notes = "Smoke test completed successfully"
   } | ConvertTo-Json
-  Invoke-RestMethod -Uri "http://127.0.0.1:8001/api/emergency/complete-emergency" -Method Post -Headers $responderHeaders -ContentType "application/json" -Body $completeBody | Out-Null
+  Invoke-RestMethod -Uri "http://127.0.0.1:8001/api/emergency/complete-emergency" -Method Post -Headers $actingResponderHeaders -ContentType "application/json" -Body $completeBody | Out-Null
 
   $orgAfterComplete = (Invoke-RestMethod -Uri "http://127.0.0.1:8001/api/organizations/$orgId" -Method Get -Headers $responderHeaders).current_load
   $divAfterComplete = $null
@@ -132,7 +153,7 @@ try {
     $staffAfterComplete = (Invoke-RestMethod -Uri "http://127.0.0.1:8001/api/staff/$staffId" -Method Get -Headers $responderHeaders).availability
   }
 
-  $sosFinal = Invoke-RestMethod -Uri "http://127.0.0.1:8001/api/sos/$sosId" -Method Get -Headers $responderHeaders
+  $sosFinal = Invoke-RestMethod -Uri "http://127.0.0.1:8001/api/sos/$sosId" -Method Get -Headers $actingResponderHeaders
 
   [ordered]@{
     health = "ok"

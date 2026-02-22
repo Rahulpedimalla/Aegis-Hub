@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import axios from 'axios';
 import { 
     AlertTriangle, 
@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import SmartAssignment from '../components/SmartAssignment';
+import { SOS_CHANGED_EVENT } from '../utils/sosRealtime';
 
 const EmergencyResponse = () => {
     const [emergencies, setEmergencies] = useState([]);
@@ -17,24 +18,36 @@ const EmergencyResponse = () => {
     const [selectedEmergency, setSelectedEmergency] = useState(null);
     const [showAssignment, setShowAssignment] = useState(false);
 
-    useEffect(() => {
-        fetchEmergencySummary();
-        const interval = setInterval(fetchEmergencySummary, 30000); // Refresh every 30 seconds
-        return () => clearInterval(interval);
-    }, []);
-
-    const fetchEmergencySummary = async () => {
+    const fetchEmergencySummary = useCallback(async (options = { silent: false }) => {
+        const silent = Boolean(options?.silent);
         try {
-            setLoading(true);
+            if (!silent) {
+                setLoading(true);
+            }
             const response = await axios.get('/api/emergency/emergency-summary');
             setEmergencies(response.data.emergencies);
         } catch (error) {
             console.error('Error fetching emergency summary:', error);
-            toast.error('Failed to fetch emergency summary');
+            if (!silent) {
+                toast.error('Failed to fetch emergency summary');
+            }
         } finally {
-            setLoading(false);
+            if (!silent) {
+                setLoading(false);
+            }
         }
-    };
+    }, []);
+
+    useEffect(() => {
+        fetchEmergencySummary();
+        const interval = setInterval(() => fetchEmergencySummary({ silent: true }), 30000);
+        const onSosChanged = () => fetchEmergencySummary({ silent: true });
+        window.addEventListener(SOS_CHANGED_EVENT, onSosChanged);
+        return () => {
+            clearInterval(interval);
+            window.removeEventListener(SOS_CHANGED_EVENT, onSosChanged);
+        };
+    }, [fetchEmergencySummary]);
 
     const getStatusColor = (status) => {
         switch (status) {
@@ -70,13 +83,13 @@ const EmergencyResponse = () => {
     };
 
     const handleAssignmentUpdate = () => {
-        fetchEmergencySummary();
+        fetchEmergencySummary({ silent: true });
         setShowAssignment(false);
         setSelectedEmergency(null);
     };
 
     const formatTime = (seconds) => {
-        if (!seconds) return 'N/A';
+        if (seconds === null || seconds === undefined) return 'N/A';
         const minutes = Math.floor(seconds / 60);
         const remainingSeconds = seconds % 60;
         return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
@@ -206,7 +219,7 @@ const EmergencyResponse = () => {
                                             </div>
                                             
                                             <div className="text-right">
-                                                {emergency.acceptance_time_remaining && (
+                                                {emergency.acceptance_time_remaining !== null && emergency.acceptance_time_remaining !== undefined && (
                                                     <div className="text-sm text-orange-600 font-medium">
                                                         {formatTime(emergency.acceptance_time_remaining)}
                                                     </div>

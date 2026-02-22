@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
 import 'package:universal_io/io.dart';
 
 enum MediaKind { image, video, audio }
@@ -56,6 +57,35 @@ class MediaAttachment {
       sha256: sha256Hex(bytes),
       kind: kind,
       bytes: bytes,
+    );
+  }
+
+  static Future<MediaAttachment> fromRecordingPath({
+    required String path,
+    required String fileName,
+    required String mimeType,
+    required MediaKind kind,
+  }) async {
+    final normalized = path.trim();
+    if (kIsWeb &&
+        (normalized.startsWith('blob:') ||
+            normalized.startsWith('data:') ||
+            normalized.startsWith('http'))) {
+      return MediaAttachment(
+        path: normalized,
+        fileName: fileName,
+        mimeType: mimeType,
+        sizeBytes: 0,
+        sha256: sha256Text(normalized),
+        kind: kind,
+        bytes: null,
+      );
+    }
+    return fromPath(
+      path: normalized,
+      fileName: fileName,
+      mimeType: mimeType,
+      kind: kind,
     );
   }
 

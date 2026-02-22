@@ -3,6 +3,7 @@ import os
 import re
 import base64
 import mimetypes
+from pathlib import Path
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional
@@ -241,15 +242,32 @@ def _gemini_generate_text_from_parts(
     timeout_seconds: int = 10,
     max_output_tokens: int = 1024,
     temperature: float = 0.2,
+    preferred_models: Optional[List[str]] = None,
 ) -> Optional[str]:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         return None
 
     model_from_env = os.getenv("GEMINI_MODEL", DEFAULT_MODEL)
-    models_to_try = _model_candidates(api_key, model_from_env)
+    models_to_try: List[str] = []
+
+    def add_model(name: Optional[str]) -> None:
+        normalized = _normalize_model_name(str(name or "").strip())
+        if normalized and normalized not in models_to_try:
+            models_to_try.append(normalized)
+
+    available = _fetch_models_supporting_generation(api_key)
+    if preferred_models:
+        for candidate in preferred_models:
+            normalized = _normalize_model_name(candidate)
+            if not available or normalized in available:
+                add_model(normalized)
+
+    for candidate in _model_candidates(api_key, model_from_env):
+        add_model(candidate)
+
     if not models_to_try:
-        models_to_try = [_normalize_model_name(model_from_env or DEFAULT_MODEL)]
+        add_model(model_from_env or DEFAULT_MODEL)
 
     contents = [{"parts": parts}]
     generation_base = {
@@ -436,8 +454,49 @@ def gemini_multimodal_media_insight(
     return " ".join(raw.split())
 
 
-def gemini_transcribe_audio(audio_path: str, language_hint: str = "en", timeout_seconds: int = 12) -> Optional[str]:
-    max_inline_bytes = max(100000, int(os.getenv("GEMINI_AUDIO_MAX_INLINE_BYTES", "5000000")))
+def _audio_mime_candidates(audio_path: str, audio_mime_type: Optional[str] = None) -> List[str]:
+    candidates: List[str] = []
+
+    def add(value: Optional[str]) -> None:
+        text = str(value or "").strip().lower()
+        if text and text not in candidates:
+            candidates.append(text)
+
+    add(audio_mime_type)
+    guessed = (mimetypes.guess_type(audio_path)[0] or "").strip().lower()
+    add(guessed)
+
+    ext = Path(audio_path).suffix.lower()
+    ext_map = {
+        ".webm": ["audio/webm"],
+        ".wav": ["audio/wav", "audio/x-wav"],
+        ".mp3": ["audio/mpeg"],
+        ".m4a": ["audio/mp4", "audio/m4a"],
+        ".mp4": ["audio/mp4"],
+        ".ogg": ["audio/ogg"],
+        ".opus": ["audio/ogg", "audio/opus"],
+        ".aac": ["audio/aac"],
+        ".flac": ["audio/flac"],
+    }
+    for mime in ext_map.get(ext, []):
+        add(mime)
+
+    # Some systems infer .webm as video/webm; Gemini audio transcription expects audio MIME.
+    if "video/webm" in candidates:
+        add("audio/webm")
+
+    if not candidates:
+        add("audio/webm" if ext == ".webm" else "audio/m4a")
+    return candidates
+
+
+def gemini_transcribe_audio(
+    audio_path: str,
+    language_hint: str = "en-IN",
+    timeout_seconds: int = 20,
+    audio_mime_type: Optional[str] = None,
+) -> Optional[str]:
+    max_inline_bytes = max(100000, int(os.getenv("GEMINI_AUDIO_MAX_INLINE_BYTES", "20000000")))
     try:
         with open(audio_path, "rb") as handle:
             blob = handle.read(max_inline_bytes + 1)
@@ -447,32 +506,45 @@ def gemini_transcribe_audio(audio_path: str, language_hint: str = "en", timeout_
     if len(blob) > max_inline_bytes:
         return None
 
-    mime = mimetypes.guess_type(audio_path)[0] or "audio/m4a"
-    parts = [
-        {
-            "text": (
-                "Transcribe this emergency audio to plain text exactly as spoken. "
-                f"Language hint: {language_hint}. "
-                "Return plain text only."
-            )
-        },
-        {
-            "inlineData": {
-                "mimeType": mime,
-                "data": base64.b64encode(blob).decode("utf-8"),
-            }
-        },
+    prompt = (
+        "Transcribe this emergency audio exactly as spoken. "
+        f"Language hint: {language_hint}. "
+        "Critical constraints: keep incident keywords such as fire/flood/medical/gas leak exactly if present; "
+        "preserve the number of affected people (convert spoken numbers to digits when clear, e.g., 'three people' -> '3 people'); "
+        "do not add extra words not spoken. "
+        "Return plain text only."
+    )
+    preferred_audio_models = [
+        str(os.getenv("GEMINI_AUDIO_MODEL") or "").strip() or "gemini-2.5-flash-native-audio-latest",
+        "gemini-2.5-flash-native-audio-preview-12-2025",
+        "gemini-2.5-flash-native-audio-preview-09-2025",
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
     ]
 
-    raw = _gemini_generate_text_from_parts(
-        parts=parts,
-        timeout_seconds=timeout_seconds,
-        max_output_tokens=1000,
-        temperature=0.0,
-    )
-    if not raw:
-        return None
-    return " ".join(raw.split())
+    for mime in _audio_mime_candidates(audio_path=audio_path, audio_mime_type=audio_mime_type):
+        parts = [
+            {"text": prompt},
+            {
+                "inlineData": {
+                    "mimeType": mime,
+                    "data": base64.b64encode(blob).decode("utf-8"),
+                }
+            },
+        ]
+
+        raw = _gemini_generate_text_from_parts(
+            parts=parts,
+            timeout_seconds=timeout_seconds,
+            max_output_tokens=1000,
+            temperature=0.0,
+            preferred_models=preferred_audio_models,
+        )
+        if raw:
+            cleaned = " ".join(raw.split())
+            if cleaned:
+                return cleaned
+    return None
 
 
 def gemini_chat_followup_response(
@@ -487,6 +559,7 @@ def gemini_chat_followup_response(
     prompt = (
         "You are a disaster response assistant. "
         "Return one concise actionable reply that includes safety guidance and one follow-up question. "
+        "If injuries are mentioned, include immediate first-aid steps only when safe to perform. "
         "Avoid medical/legal guarantees.\n"
         f"incident_summary={incident_summary}\n"
         f"chat_history=\n{condensed_history}\n"

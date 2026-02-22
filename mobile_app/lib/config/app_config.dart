@@ -4,6 +4,7 @@ class AppConfig {
     required this.ticketsEndpointPath,
     required this.sosEndpointPath,
     required this.chatEndpointPath,
+    required this.transcribeEndpointPath,
     required this.sttProvider,
     required this.ttsProvider,
     required this.realtimeProvider,
@@ -16,6 +17,7 @@ class AppConfig {
   final String ticketsEndpointPath;
   final String sosEndpointPath;
   final String chatEndpointPath;
+  final String transcribeEndpointPath;
   final String sttProvider;
   final String ttsProvider;
   final String realtimeProvider;
@@ -28,6 +30,7 @@ class AppConfig {
     String? ticketsEndpointPath,
     String? sosEndpointPath,
     String? chatEndpointPath,
+    String? transcribeEndpointPath,
     String? sttProvider,
     String? ttsProvider,
     String? realtimeProvider,
@@ -40,6 +43,7 @@ class AppConfig {
       ticketsEndpointPath: ticketsEndpointPath ?? this.ticketsEndpointPath,
       sosEndpointPath: sosEndpointPath ?? this.sosEndpointPath,
       chatEndpointPath: chatEndpointPath ?? this.chatEndpointPath,
+      transcribeEndpointPath: transcribeEndpointPath ?? this.transcribeEndpointPath,
       sttProvider: sttProvider ?? this.sttProvider,
       ttsProvider: ttsProvider ?? this.ttsProvider,
       realtimeProvider: realtimeProvider ?? this.realtimeProvider,
@@ -55,8 +59,9 @@ class AppConfig {
       ticketsEndpointPath: (json['ticketsEndpointPath'] ?? '/api/mobile/tickets').toString(),
       sosEndpointPath: (json['sosEndpointPath'] ?? '/api/mobile/tickets').toString(),
       chatEndpointPath: (json['chatEndpointPath'] ?? '/api/mobile/chat').toString(),
-      sttProvider: (json['sttProvider'] ?? 'deepgram').toString(),
-      ttsProvider: (json['ttsProvider'] ?? 'cartesia').toString(),
+      transcribeEndpointPath: (json['transcribeEndpointPath'] ?? '/api/mobile/ai/transcribe').toString(),
+      sttProvider: (json['sttProvider'] ?? 'backend_gemini').toString(),
+      ttsProvider: (json['ttsProvider'] ?? 'system').toString(),
       realtimeProvider: (json['realtimeProvider'] ?? 'openai_realtime').toString(),
       connectTimeoutMs: int.tryParse((json['connectTimeoutMs'] ?? '15000').toString()) ?? 15000,
       receiveTimeoutMs: int.tryParse((json['receiveTimeoutMs'] ?? '20000').toString()) ?? 20000,

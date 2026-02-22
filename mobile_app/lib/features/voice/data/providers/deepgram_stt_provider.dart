@@ -8,7 +8,9 @@ class DeepgramSttProvider implements SttProvider {
   @override
   Future<VoiceTranscript> transcribeFile({
     required String audioPath,
-    String languageCode = 'en',
+    String languageCode = 'en-IN',
+    String? audioMimeType,
+    String? audioFileName,
   }) async {
     // Integration point: replace with Deepgram speech-to-text API call.
     return const VoiceTranscript(

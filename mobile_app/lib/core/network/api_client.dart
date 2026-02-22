@@ -1,8 +1,10 @@
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:http_parser/http_parser.dart';
 
+import 'blob_bytes_loader.dart' as blob_loader;
 import '../../config/app_config.dart';
 import '../../features/chat/domain/entities/chat_message.dart';
 import '../../features/tickets/domain/entities/ticket_payload.dart';
@@ -123,6 +125,8 @@ class ApiClient {
   Future<Map<String, String>> sendVoiceChatMessage({
     required String chatSessionId,
     String? audioPath,
+    String? audioMimeType,
+    String? audioFileName,
     String? textHint,
   }) async {
     const path = '/api/mobile/ai/voice-agent';
@@ -135,10 +139,10 @@ class ApiClient {
       formData.files.add(
         MapEntry(
           'audio_file',
-          await MultipartFile.fromFile(
+          await _buildAudioMultipartFromPath(
             audioPath!,
-            filename: 'chat_voice.m4a',
-            contentType: MediaType.parse('audio/m4a'),
+            preferredMimeType: audioMimeType,
+            preferredFileName: audioFileName,
           ),
         ),
       );
@@ -153,6 +157,39 @@ class ApiClient {
       };
     } on DioException catch (error) {
       throw AppException('Voice chat request failed', cause: error);
+    }
+  }
+
+  Future<Map<String, String>> transcribeAudio({
+    required String audioPath,
+    String languageCode = 'en-IN',
+    String? audioMimeType,
+    String? audioFileName,
+  }) async {
+    final formData = FormData.fromMap({
+      'language_hint': languageCode,
+    });
+    formData.files.add(
+      MapEntry(
+        'audio_file',
+        await _buildAudioMultipartFromPath(
+          audioPath,
+          preferredMimeType: audioMimeType,
+          preferredFileName: audioFileName,
+        ),
+      ),
+    );
+
+    try {
+      final response = await _dio.post<dynamic>(_config.transcribeEndpointPath, data: formData);
+      final body = _asMap(response.data);
+      return {
+        'transcript': (body['transcript'] ?? '').toString(),
+        'provider': (body['provider'] ?? 'gemini').toString(),
+        'language': (body['language'] ?? languageCode).toString(),
+      };
+    } on DioException catch (error) {
+      throw AppException('Audio transcription failed', cause: error);
     }
   }
 
@@ -179,11 +216,120 @@ class ApiClient {
         contentType: MediaType.parse(mimeType),
       );
     }
+    if (attachment.kind == MediaKind.audio) {
+      return _buildAudioMultipartFromPath(
+        path,
+        preferredFileName: fileName,
+        preferredMimeType: mimeType,
+      );
+    }
     return MultipartFile.fromFile(
       path,
       filename: fileName,
       contentType: MediaType.parse(mimeType),
     );
+  }
+
+  Future<MultipartFile> _buildAudioMultipartFromPath(
+    String audioPath, {
+    String? preferredFileName,
+    String? preferredMimeType,
+  }) async {
+    final path = audioPath.trim();
+    if (path.isEmpty) {
+      throw AppException('Audio path is empty');
+    }
+
+    final inferredMime = _inferAudioMimeType(path);
+    final providedMime = (preferredMimeType ?? '').trim();
+    final mime = providedMime.isNotEmpty ? providedMime : inferredMime;
+    final providedFileName = (preferredFileName ?? '').trim();
+    final fileName = providedFileName.isNotEmpty
+        ? providedFileName
+        : _inferFileNameFromPath(path, mime);
+
+    if (kIsWeb && _isWebBlobLikePath(path)) {
+      final blobBytes = await blob_loader.readBlobBytes(path);
+      if (blobBytes != null && blobBytes.isNotEmpty) {
+        return MultipartFile.fromBytes(
+          blobBytes,
+          filename: fileName,
+          contentType: MediaType.parse(mime),
+        );
+      }
+
+      try {
+        final response = await _dio.get<List<int>>(
+          path,
+          options: Options(responseType: ResponseType.bytes),
+        );
+        final bytes = response.data ?? const <int>[];
+        if (bytes.isNotEmpty) {
+          return MultipartFile.fromBytes(
+            bytes,
+            filename: fileName,
+            contentType: MediaType.parse(mime),
+          );
+        }
+      } catch (_) {
+        // Continue to regular file handling fallback.
+      }
+    }
+
+    return MultipartFile.fromFile(
+      path,
+      filename: fileName,
+      contentType: MediaType.parse(mime),
+    );
+  }
+
+  bool _isWebBlobLikePath(String path) {
+    final lower = path.toLowerCase();
+    return lower.startsWith('blob:') || lower.startsWith('data:') || lower.startsWith('http');
+  }
+
+  String _inferAudioMimeType(String path) {
+    final lower = path.toLowerCase();
+    if (lower.endsWith('.wav')) {
+      return 'audio/wav';
+    }
+    if (lower.endsWith('.mp3')) {
+      return 'audio/mpeg';
+    }
+    if (lower.endsWith('.webm')) {
+      return 'audio/webm';
+    }
+    if (lower.endsWith('.ogg') || lower.endsWith('.opus')) {
+      return 'audio/ogg';
+    }
+    return 'audio/m4a';
+  }
+
+  String _inferFileNameFromPath(String path, String mimeType) {
+    final normalized = path.trim();
+    if (normalized.isNotEmpty &&
+        !normalized.startsWith('blob:') &&
+        !normalized.startsWith('data:')) {
+      final parsed = Uri.tryParse(normalized);
+      final segments = parsed?.pathSegments ?? const <String>[];
+      if (segments.isNotEmpty && segments.last.trim().isNotEmpty) {
+        return segments.last.trim();
+      }
+    }
+
+    if (mimeType == 'audio/wav') {
+      return 'recording.wav';
+    }
+    if (mimeType == 'audio/webm') {
+      return 'recording.webm';
+    }
+    if (mimeType == 'audio/ogg') {
+      return 'recording.ogg';
+    }
+    if (mimeType == 'audio/mpeg') {
+      return 'recording.mp3';
+    }
+    return 'recording.m4a';
   }
 
   Map<String, dynamic> _asMap(dynamic value) {

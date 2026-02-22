@@ -13,6 +13,7 @@ import Divisions from './pages/Divisions';
 import EmergencyResponse from './pages/EmergencyResponse';
 import Login from './pages/Login';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
+import TicketRaisedNotifier from './components/TicketRaisedNotifier';
 import './index.css';
 
 const ProtectedPage = ({ children }) => {
@@ -53,6 +54,7 @@ function AppContent() {
 
   return (
     <>
+      {isAuthenticated && <TicketRaisedNotifier />}
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/login" element={isAuthenticated ? <Navigate to="/dashboard" replace /> : <Login />} />
@@ -174,4 +176,3 @@ function App() {
 }
 
 export default App;
-

@@ -5,6 +5,8 @@ abstract class SttProvider {
 
   Future<VoiceTranscript> transcribeFile({
     required String audioPath,
-    String languageCode = 'en',
+    String languageCode = 'en-IN',
+    String? audioMimeType,
+    String? audioFileName,
   });
 }

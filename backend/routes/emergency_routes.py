@@ -7,15 +7,28 @@ from datetime import datetime, timedelta
 import asyncio
 import uuid
 
-from database import get_db, SessionLocal, SOSRequest, Organization, Staff, Division, Shelter, Hospital, ResourceCenter
+from database import (
+    get_db,
+    SessionLocal,
+    SOSRequest,
+    Organization,
+    Staff,
+    Division,
+    Shelter,
+    Hospital,
+    ResourceCenter,
+    TicketUpdate,
+)
 from models import SOSRequestResponse
 from routes.auth_routes import get_current_user, require_roles
 from services.assignment_service import recommend_assignment
 from services.geo_utils import infer_telangana_anchor
 from services.triage_service import triage_sos
 from services.workload_service import release_assignment_workload, transfer_assignment_workload
+from services.staff_resolution_service import resolve_responder_staff
 
 router = APIRouter()
+ASSIGNMENT_RESPONSE_WINDOW_SECONDS = 60
 
 def calculate_distance(lat1, lon1, lat2, lon2):
     """Calculate distance between two coordinates using Haversine formula"""
@@ -31,41 +44,11 @@ def calculate_distance(lat1, lon1, lat2, lon2):
     return R * c
 
 
-def _normalize_person(value: str) -> str:
-    return "".join(ch.lower() for ch in (value or "") if ch.isalnum())
-
-
-def _resolve_responder_staff(current_user, db: Session) -> Optional[Staff]:
-    """
-    Best-effort mapping of authenticated responder user to a staff record.
-    Priority:
-    1) username-to-name normalization match
-    2) unique staff in user's division
-    """
-    username = (current_user.username or "").strip()
-    username_norm = _normalize_person(username.replace(".", " "))
-
-    active_staff = db.query(Staff).filter(Staff.status == "Active").all()
-    exact_matches = [s for s in active_staff if _normalize_person(s.name or "") == username_norm]
-    if len(exact_matches) == 1:
-        return exact_matches[0]
-
-    if current_user.division_id:
-        by_division = [
-            s for s in active_staff
-            if str(s.division_id or "") == str(current_user.division_id)
-        ]
-        if len(by_division) == 1:
-            return by_division[0]
-
-    return None
-
-
 def _can_responder_act_on_sos(current_user, sos: SOSRequest, db: Session) -> tuple[bool, Optional[Staff]]:
     if (current_user.role or "").lower() != "responder":
         return False, None
 
-    staff = _resolve_responder_staff(current_user, db)
+    staff = resolve_responder_staff(current_user, db)
     if not staff:
         return False, None
 
@@ -74,25 +57,58 @@ def _can_responder_act_on_sos(current_user, sos: SOSRequest, db: Session) -> tup
 
     return str(sos.assigned_to) == str(staff.id), staff
 
+
+def _historical_rejected_staff_ids(db: Session, sos_id: str) -> set[str]:
+    rows = (
+        db.query(TicketUpdate)
+        .filter(
+            TicketUpdate.ticket_id == str(sos_id),
+            TicketUpdate.field_name == "assignment_rejection",
+        )
+        .all()
+    )
+    rejected: set[str] = set()
+    for row in rows:
+        rejected_id = str(row.old_value or "").strip()
+        if rejected_id and rejected_id != "None":
+            rejected.add(rejected_id)
+    return rejected
+
 async def auto_reassign_emergency(sos_id: str):
-    """Automatically reassign emergency after 5 minutes if not accepted"""
-    await asyncio.sleep(300)  # Wait 5 minutes
+    """Automatically reassign emergency after response window if not accepted."""
+    await asyncio.sleep(ASSIGNMENT_RESPONSE_WINDOW_SECONDS)
 
     db = SessionLocal()
     try:
         # Check if the emergency is still pending assignment
         sos = db.query(SOSRequest).filter(SOSRequest.id == sos_id).first()
-        if sos and sos.status == "Pending Assignment":
+        if (
+            sos
+            and sos.status == "Pending Assignment"
+            and sos.assignment_time
+            and (datetime.utcnow() - sos.assignment_time).total_seconds() >= ASSIGNMENT_RESPONSE_WINDOW_SECONDS
+        ):
             # Auto-reassign to next best team
-            await reassign_to_next_best_team(sos_id, db)
+            await reassign_to_next_best_team(
+                sos_id,
+                db,
+                exclude_staff_ids=[str(sos.assigned_to)] if sos.assigned_to else [],
+                preferred_org_id=str(sos.assigned_organization) if sos.assigned_organization else None,
+            )
     finally:
         db.close()
 
-async def reassign_to_next_best_team(sos_id: str, db: Session):
-    """Reassign emergency to the next best available team"""
+async def reassign_to_next_best_team(
+    sos_id: str,
+    db: Session,
+    exclude_staff_ids: Optional[List[str]] = None,
+    exclude_org_ids: Optional[List[str]] = None,
+    preferred_org_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Reassign emergency to next best team; prefers same org with a different responder first."""
     sos = db.query(SOSRequest).filter(SOSRequest.id == sos_id).first()
     if not sos:
-        return
+        return None
 
     old_org = sos.assigned_organization
     old_staff = sos.assigned_to
@@ -105,26 +121,82 @@ async def reassign_to_next_best_team(sos_id: str, db: Session):
         category_hint=sos.category,
         place=sos.place,
     )
-    scored = recommend_assignment(
-        sos,
-        db.query(Organization).all(),
-        db.query(Staff).all(),
-        db.query(Division).all(),
-        triage_context=triage,
-    )
-    recommended = scored.get("recommended_assignment", {})
+    resolved_preferred_org = preferred_org_id or (str(old_org) if old_org else None)
+    resolved_exclude_staff = set(str(item) for item in (exclude_staff_ids or []) if str(item or "").strip())
+    resolved_exclude_staff.update(_historical_rejected_staff_ids(db, sos_id))
+    if old_staff:
+        resolved_exclude_staff.add(str(old_staff))
+    resolved_exclude_orgs = [str(item) for item in (exclude_org_ids or []) if str(item or "").strip()]
 
-    candidate_orgs = []
-    if recommended.get("organization"):
-        candidate_orgs.append(recommended["organization"])
-    candidate_orgs.extend(recommended.get("alternatives", {}).get("organizations", []))
+    def _scored_candidates(preferred_org: Optional[str]) -> List[Dict[str, Any]]:
+        scored_payload = recommend_assignment(
+            sos,
+            db.query(Organization).all(),
+            db.query(Staff).all(),
+            db.query(Division).all(),
+            triage_context=triage,
+            assignment_constraints={
+                "exclude_staff_ids": sorted(resolved_exclude_staff),
+                "exclude_org_ids": resolved_exclude_orgs,
+                "preferred_org_id": preferred_org,
+            },
+        )
+        recommended_assignment = scored_payload.get("recommended_assignment", {})
+        ranked = scored_payload.get("candidate_assignments", []) or []
+        if not ranked and recommended_assignment.get("organization") and recommended_assignment.get("staff"):
+            ranked = [
+                {
+                    "organization": recommended_assignment.get("organization"),
+                    "staff": recommended_assignment.get("staff"),
+                    "division": recommended_assignment.get("division"),
+                    "score": scored_payload.get("assignment_score", 0),
+                }
+            ]
+        return ranked
 
-    next_org = next((org for org in candidate_orgs if org and org.get("id") != old_org), None)
-    if not next_org:
-        return
+    candidates = _scored_candidates(resolved_preferred_org)
 
-    next_staff = recommended.get("staff")
-    next_division = recommended.get("division")
+    old_org_id = str(old_org or "")
+    old_staff_id = str(old_staff or "")
+    old_division_id = str(old_division or "")
+
+    def _is_distinct(candidate: Dict[str, Any]) -> bool:
+        org_id = str((candidate.get("organization") or {}).get("id") or "")
+        staff_id = str((candidate.get("staff") or {}).get("id") or "")
+        division_id = str((candidate.get("division") or {}).get("id") or "")
+        return org_id != old_org_id or staff_id != old_staff_id or division_id != old_division_id
+
+    def _first_distinct(
+        pool: List[Dict[str, Any]],
+        required_org_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        for item in pool:
+            if not _is_distinct(item):
+                continue
+            if required_org_id:
+                org_id = str((item.get("organization") or {}).get("id") or "")
+                if org_id != str(required_org_id):
+                    continue
+            return item
+        return None
+
+    next_candidate = _first_distinct(candidates, required_org_id=old_org_id or resolved_preferred_org)
+    if not next_candidate:
+        next_candidate = _first_distinct(candidates)
+
+    # If same-organization candidates are exhausted, broaden to all orgs while preserving reject exclusions.
+    if not next_candidate and resolved_preferred_org:
+        expanded_candidates = _scored_candidates(preferred_org=None)
+        next_candidate = _first_distinct(expanded_candidates, required_org_id=old_org_id)
+        if not next_candidate:
+            next_candidate = _first_distinct(expanded_candidates)
+
+    if not next_candidate:
+        return None
+
+    next_org = next_candidate.get("organization")
+    next_staff = next_candidate.get("staff")
+    next_division = next_candidate.get("division")
 
     transfer_assignment_workload(
         db,
@@ -144,9 +216,34 @@ async def reassign_to_next_best_team(sos_id: str, db: Session):
     sos.assignment_time = datetime.utcnow()
     sos.updated_at = datetime.utcnow()
 
-    # Start new 5-minute timer
+    db.add(
+        TicketUpdate(
+            ticket_id=str(sos.id),
+            updated_by="system",
+            field_name="assignment_reassigned",
+            old_value=str(old_staff) if old_staff else None,
+            new_value=str(sos.assigned_to) if sos.assigned_to else None,
+            notes=(
+                f"Auto-reassigned with excluded_staff={sorted(resolved_exclude_staff)}; "
+                f"preferred_org={resolved_preferred_org or 'none'}"
+            ),
+        )
+    )
+
+    # Start new response-window timer
     asyncio.create_task(auto_reassign_emergency(sos_id))
     db.commit()
+    db.refresh(sos)
+    return {
+        "sos_id": str(sos.id),
+        "organization_id": sos.assigned_organization,
+        "organization_name": next_org.get("name") if next_org else None,
+        "staff_id": sos.assigned_to,
+        "staff_name": next_staff.get("name") if next_staff else None,
+        "division_id": sos.assigned_division,
+        "division_name": next_division.get("name") if next_division else None,
+        "status": sos.status,
+    }
 
 async def reassign_to_next_best_team_background(sos_id: str):
     db = SessionLocal()
@@ -154,6 +251,22 @@ async def reassign_to_next_best_team_background(sos_id: str):
         await reassign_to_next_best_team(sos_id, db)
     finally:
         db.close()
+
+
+async def _expire_and_reassign_if_needed(sos: SOSRequest, db: Session) -> Optional[Dict[str, Any]]:
+    if sos.status != "Pending Assignment" or not sos.assignment_time:
+        return None
+
+    elapsed = (datetime.utcnow() - sos.assignment_time).total_seconds()
+    if elapsed <= ASSIGNMENT_RESPONSE_WINDOW_SECONDS:
+        return None
+
+    return await reassign_to_next_best_team(
+        str(sos.id),
+        db,
+        exclude_staff_ids=[str(sos.assigned_to)] if sos.assigned_to else [],
+        preferred_org_id=str(sos.assigned_organization) if sos.assigned_organization else None,
+    )
 
 @router.get("/coordination-dashboard")
 async def get_emergency_coordination_dashboard(
@@ -335,6 +448,19 @@ async def get_smart_assignment(
     if not sos:
         raise HTTPException(status_code=404, detail="SOS request not found")
 
+    if sos.status in ["Pending", "Pending Assignment"] and not sos.assigned_to:
+        reassigned_missing = await reassign_to_next_best_team(str(sos.id), db)
+        if reassigned_missing:
+            sos = db.query(SOSRequest).filter(SOSRequest.id == sos_id).first()
+            if not sos:
+                raise HTTPException(status_code=404, detail="SOS request not found")
+
+    reassigned = await _expire_and_reassign_if_needed(sos, db)
+    if reassigned:
+        sos = db.query(SOSRequest).filter(SOSRequest.id == sos_id).first()
+        if not sos:
+            raise HTTPException(status_code=404, detail="SOS request not found")
+
     organizations = db.query(Organization).all()
     staff_members = db.query(Staff).all()
     divisions = db.query(Division).all()
@@ -348,11 +474,21 @@ async def get_smart_assignment(
     )
     scored = recommend_assignment(sos, organizations, staff_members, divisions, triage_context=triage)
 
+    assigned_org = None
+    assigned_staff = None
+    assigned_division = None
+    if sos.assigned_organization:
+        assigned_org = db.query(Organization).filter(Organization.id == sos.assigned_organization).first()
+    if sos.assigned_to:
+        assigned_staff = db.query(Staff).filter(Staff.id == sos.assigned_to).first()
+    if sos.assigned_division:
+        assigned_division = db.query(Division).filter(Division.id == sos.assigned_division).first()
+
     # Compute assignment response window status.
     time_remaining = None
     if sos.status == "Pending Assignment" and sos.assignment_time:
         elapsed = (datetime.utcnow() - sos.assignment_time).total_seconds()
-        time_remaining = max(0, 300 - elapsed)
+        time_remaining = max(0, ASSIGNMENT_RESPONSE_WINDOW_SECONDS - elapsed)
 
     can_act, resolved_staff = _can_responder_act_on_sos(current_user, sos, db)
 
@@ -367,10 +503,14 @@ async def get_smart_assignment(
             "assigned_organization": str(sos.assigned_organization) if sos.assigned_organization else None,
             "assigned_staff": str(sos.assigned_to) if sos.assigned_to else None,
             "assigned_division": str(sos.assigned_division) if sos.assigned_division else None,
+            "assigned_organization_name": assigned_org.name if assigned_org else None,
+            "assigned_staff_name": assigned_staff.name if assigned_staff else None,
+            "assigned_division_name": assigned_division.name if assigned_division else None,
         },
         "recommended_assignment": scored["recommended_assignment"],
         "assignment_score": scored["assignment_score"],
         "ai_assignment_context": scored.get("assignment_context", {}),
+        "auto_reassignment": reassigned,
         "user_permissions": {
             "can_accept_reject_complete": can_act,
             "resolved_staff_id": str(resolved_staff.id) if resolved_staff else None,
@@ -388,7 +528,7 @@ async def assign_emergency(
     db: Session = Depends(get_db),
     current_user = Depends(require_roles("admin", "responder")),
 ):
-    """Assign emergency to organization with 5-minute acceptance window"""
+    """Assign emergency to organization with one-minute acceptance window."""
     try:
         sos_id = assignment_data.get("sos_id")
         organization_id = assignment_data.get("organization_id")
@@ -402,7 +542,52 @@ async def assign_emergency(
         if not sos:
             raise HTTPException(status_code=404, detail="SOS request not found")
 
-        was_uncommitted_pending = sos.status == "Pending" and sos.assignment_time is None
+        # Ensure we always assign both organization and staff.
+        if not organization_id or not staff_id:
+            triage = triage_sos(
+                text=sos.text,
+                voice_transcript=None,
+                people=sos.people,
+                category_hint=sos.category,
+                place=sos.place,
+            )
+            scored = recommend_assignment(
+                sos,
+                db.query(Organization).all(),
+                db.query(Staff).all(),
+                db.query(Division).all(),
+                triage_context=triage,
+                assignment_constraints={"preferred_org_id": organization_id} if organization_id else None,
+            )
+            recommended = scored.get("recommended_assignment", {})
+            rec_org = recommended.get("organization") or {}
+            rec_staff = recommended.get("staff") or {}
+            rec_division = recommended.get("division") or {}
+            organization_id = organization_id or rec_org.get("id")
+            staff_id = staff_id or rec_staff.get("id")
+            division_id = division_id or rec_division.get("id")
+
+        if not organization_id or not staff_id:
+            raise HTTPException(
+                status_code=422,
+                detail="No valid organization/staff available for assignment",
+            )
+
+        staff_record = db.query(Staff).filter(Staff.id == staff_id).first()
+        if not staff_record:
+            raise HTTPException(status_code=404, detail="Assigned staff not found")
+
+        if str(staff_record.organization_id) != str(organization_id):
+            organization_id = staff_record.organization_id
+
+        if not division_id and staff_record.division_id:
+            division_id = staff_record.division_id
+
+        was_uncommitted_pending = (
+            sos.status == "Pending"
+            and sos.assignment_time is None
+            and not any([sos.assigned_organization, sos.assigned_to, sos.assigned_division])
+        )
         old_org = sos.assigned_organization
         old_staff = sos.assigned_to
         old_division = sos.assigned_division
@@ -427,17 +612,23 @@ async def assign_emergency(
         )
 
         db.commit()
+        assigned_org = db.query(Organization).filter(Organization.id == organization_id).first()
+        assigned_staff = db.query(Staff).filter(Staff.id == staff_id).first()
+        assigned_division = db.query(Division).filter(Division.id == division_id).first() if division_id else None
         
-        # Start 5-minute timer for auto-reassignment
+        # Start one-minute timer for auto-reassignment
         background_tasks.add_task(auto_reassign_emergency, sos_id)
         
         return {
-            "message": "Emergency assigned successfully. Organization has 5 minutes to accept.",
+            "message": "Emergency assigned successfully. Assigned responder has 1 minute to accept.",
             "sos_id": sos_id,
             "assigned_organization": organization_id,
+            "assigned_organization_name": assigned_org.name if assigned_org else None,
             "assigned_staff": staff_id,
+            "assigned_staff_name": assigned_staff.name if assigned_staff else None,
             "assigned_division": division_id,
-            "acceptance_deadline": (datetime.utcnow() + timedelta(minutes=5)).isoformat()
+            "assigned_division_name": assigned_division.name if assigned_division else None,
+            "acceptance_deadline": (datetime.utcnow() + timedelta(seconds=ASSIGNMENT_RESPONSE_WINDOW_SECONDS)).isoformat()
         }
         
     except HTTPException:
@@ -482,12 +673,26 @@ async def accept_assignment(
         if sos.status not in ["Pending Assignment", "Pending"]:
             raise HTTPException(status_code=400, detail="Emergency not eligible for acceptance")
         
-        # Check if within 5-minute window
+        # Check if still within the one-minute response window.
         if sos.status == "Pending" and not sos.assignment_time:
             sos.assignment_time = datetime.utcnow()
 
-        if sos.assignment_time and (datetime.utcnow() - sos.assignment_time).total_seconds() > 300:
-            raise HTTPException(status_code=400, detail="Acceptance window expired. Emergency will be reassigned.")
+        if sos.assignment_time and (
+            datetime.utcnow() - sos.assignment_time
+        ).total_seconds() > ASSIGNMENT_RESPONSE_WINDOW_SECONDS:
+            reassigned = await reassign_to_next_best_team(
+                str(sos.id),
+                db,
+                exclude_staff_ids=[str(sos.assigned_to)] if sos.assigned_to else [],
+                preferred_org_id=str(sos.assigned_organization) if sos.assigned_organization else None,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Acceptance window expired. Emergency reassigned immediately.",
+                    "reassigned_to": reassigned,
+                },
+            )
         
         parsed_completion = None
         if estimated_completion:
@@ -534,7 +739,6 @@ async def accept_assignment(
 @router.post("/reject-assignment")
 async def reject_assignment(
     rejection_data: Dict[str, Any],
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user = Depends(require_roles("responder")),
 ):
@@ -560,31 +764,36 @@ async def reject_assignment(
         
         if sos.assigned_organization != organization_id:
             raise HTTPException(status_code=400, detail="Organization not assigned to this emergency")
-        
-        # Reject assignment and release resources.
-        old_org = sos.assigned_organization
-        old_staff = sos.assigned_to
-        old_division = sos.assigned_division
 
-        release_assignment_workload(db, old_org, old_division, old_staff)
+        rejected_staff_id = str(sos.assigned_to or "").strip()
+        if rejected_staff_id:
+            db.add(
+                TicketUpdate(
+                    ticket_id=str(sos.id),
+                    updated_by=str(staff.id) if staff else "system",
+                    field_name="assignment_rejection",
+                    old_value=rejected_staff_id,
+                    new_value=rejection_reason,
+                    notes=f"Rejected by organization {organization_id}",
+                )
+            )
+            db.flush()
+        
+        reassigned = await reassign_to_next_best_team(
+            str(sos.id),
+            db,
+            exclude_staff_ids=[str(sos.assigned_to)] if sos.assigned_to else [],
+            preferred_org_id=str(sos.assigned_organization) if sos.assigned_organization else None,
+        )
+        if not reassigned:
+            raise HTTPException(status_code=422, detail="No replacement responder could be assigned")
 
-        sos.status = "Pending"
-        sos.assigned_organization = None
-        sos.assigned_to = None
-        sos.assigned_division = None
-        sos.assignment_time = None
-        sos.updated_at = datetime.utcnow()
-        
-        db.commit()
-        
-        # Immediately reassign to next best team
-        background_tasks.add_task(reassign_to_next_best_team_background, sos_id)
-        
         return {
-            "message": "Assignment rejected. Emergency will be reassigned to next best team.",
+            "message": "Assignment rejected and reassigned immediately.",
             "sos_id": sos_id,
-            "status": "Pending",
-            "rejection_reason": rejection_reason
+            "status": "Pending Assignment",
+            "rejection_reason": rejection_reason,
+            "reassigned_to": reassigned,
         }
         
     except HTTPException:
@@ -736,7 +945,7 @@ async def get_response_status(sos_id: str, db: Session = Depends(get_db)):
     time_remaining = None
     if sos.status == "Pending Assignment" and sos.assignment_time:
         elapsed = (datetime.utcnow() - sos.assignment_time).total_seconds()
-        time_remaining = max(0, 300 - elapsed)  # 5 minutes = 300 seconds
+        time_remaining = max(0, ASSIGNMENT_RESPONSE_WINDOW_SECONDS - elapsed)
     
     return {
         "sos_request": {
@@ -775,19 +984,39 @@ async def get_response_status(sos_id: str, db: Session = Depends(get_db)):
             "estimated_completion": sos.estimated_completion,
             "actual_completion": sos.actual_completion,
             "is_overdue": sos.estimated_completion and datetime.utcnow() > sos.estimated_completion,
-            "acceptance_time_remaining": round(time_remaining, 1) if time_remaining else None
+            "acceptance_time_remaining": round(time_remaining, 1) if time_remaining is not None else None
         }
     }
 
 @router.get("/emergency-summary")
-async def get_emergency_summary(db: Session = Depends(get_db)):
+async def get_emergency_summary(
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user),
+):
     """Get summary of all active emergencies and response status"""
-    active_sos = db.query(SOSRequest).filter(
+    query = db.query(SOSRequest).filter(
         SOSRequest.status.in_(["Pending", "In Progress", "Pending Assignment"])
-    ).order_by(SOSRequest.priority.desc(), SOSRequest.created_at.asc()).all()
+    )
+    if (current_user.role or "").lower() == "responder":
+        resolved_staff = resolve_responder_staff(current_user, db)
+        if not resolved_staff:
+            query = query.filter(SOSRequest.id == "__none__")
+        else:
+            query = query.filter(SOSRequest.assigned_to == resolved_staff.id)
+
+    active_sos = query.order_by(SOSRequest.priority.desc(), SOSRequest.created_at.asc()).all()
     
     emergency_summary = []
     for sos in active_sos:
+        if sos.status in ["Pending", "Pending Assignment"] and not sos.assigned_to:
+            reassigned_missing = await reassign_to_next_best_team(str(sos.id), db)
+            if reassigned_missing:
+                sos = db.query(SOSRequest).filter(SOSRequest.id == sos.id).first() or sos
+
+        reassigned = await _expire_and_reassign_if_needed(sos, db)
+        if reassigned:
+            sos = db.query(SOSRequest).filter(SOSRequest.id == sos.id).first() or sos
+
         # Get assignment details
         organization = None
         if sos.assigned_organization:
@@ -808,7 +1037,7 @@ async def get_emergency_summary(db: Session = Depends(get_db)):
         acceptance_time_remaining = None
         if sos.status == "Pending Assignment" and sos.assignment_time:
             elapsed = (datetime.utcnow() - sos.assignment_time).total_seconds()
-            acceptance_time_remaining = max(0, 300 - elapsed)
+            acceptance_time_remaining = max(0, ASSIGNMENT_RESPONSE_WINDOW_SECONDS - elapsed)
         
         emergency_summary.append({
             "id": str(sos.id),
@@ -822,7 +1051,7 @@ async def get_emergency_summary(db: Session = Depends(get_db)):
             "assigned_staff": assigned_staff.name if assigned_staff else "Unassigned",
             "assigned_division": assigned_division.name if assigned_division else "Unassigned",
             "is_overdue": sos.estimated_completion and datetime.utcnow() > sos.estimated_completion,
-            "acceptance_time_remaining": round(acceptance_time_remaining, 1) if acceptance_time_remaining else None
+            "acceptance_time_remaining": round(acceptance_time_remaining, 1) if acceptance_time_remaining is not None else None
         })
     
     return {

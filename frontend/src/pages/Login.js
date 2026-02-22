@@ -1,8 +1,15 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { Shield, Eye, EyeOff, AlertCircle } from 'lucide-react';
+import axios from 'axios';
 import toast from 'react-hot-toast';
+
+const DEFAULT_DEMO_CREDENTIALS_BY_ROLE = {
+  admin: [{ username: 'admin', password: 'admin123' }],
+  responder: [{ username: 'responder', password: 'responder123' }],
+  viewer: [{ username: 'viewer', password: 'viewer123' }],
+};
 
 const Login = () => {
   const [formData, setFormData] = useState({
@@ -12,7 +19,44 @@ const Login = () => {
   });
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [demoCredentialsByRole, setDemoCredentialsByRole] = useState(DEFAULT_DEMO_CREDENTIALS_BY_ROLE);
+  const [demoLoading, setDemoLoading] = useState(true);
   const { login } = useAuth();
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadDemoCredentials = async () => {
+      try {
+        const response = await axios.get('/api/auth/demo-credentials');
+        const next = response?.data?.credentials ?? {};
+        if (cancelled) {
+          return;
+        }
+        setDemoCredentialsByRole({
+          admin: Array.isArray(next.admin) && next.admin.length > 0 ? next.admin : DEFAULT_DEMO_CREDENTIALS_BY_ROLE.admin,
+          responder:
+            Array.isArray(next.responder) && next.responder.length > 0
+              ? next.responder
+              : DEFAULT_DEMO_CREDENTIALS_BY_ROLE.responder,
+          viewer: Array.isArray(next.viewer) && next.viewer.length > 0 ? next.viewer : DEFAULT_DEMO_CREDENTIALS_BY_ROLE.viewer,
+        });
+      } catch (_) {
+        if (!cancelled) {
+          setDemoCredentialsByRole(DEFAULT_DEMO_CREDENTIALS_BY_ROLE);
+        }
+      } finally {
+        if (!cancelled) {
+          setDemoLoading(false);
+        }
+      }
+    };
+
+    loadDemoCredentials();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -42,22 +86,6 @@ const Login = () => {
       ...formData,
       [e.target.name]: e.target.value
     });
-  };
-
-  const demoCredentialsByRole = {
-    admin: [
-      { username: 'admin', password: 'admin123' },
-    ],
-    responder: [
-      { username: 'responder', password: 'responder123' },
-      { username: 'harish.rao', password: 'responder123' },
-      { username: 'dr.sneha.reddy', password: 'responder123' },
-      { username: 'kiran.kumar', password: 'responder123' },
-      { username: 'madhavi.ch', password: 'responder123' },
-    ],
-    viewer: [
-      { username: 'viewer', password: 'viewer123' },
-    ],
   };
 
   const selectedRoleCredentials = demoCredentialsByRole[formData.role] || [];
@@ -171,11 +199,17 @@ const Login = () => {
               <AlertCircle className="w-5 h-5 text-blue-600 mt-0.5 flex-shrink-0" />
               <div className="text-sm text-blue-800">
                 <p className="font-medium mb-1">Demo Credentials ({formData.role}):</p>
-                {selectedRoleCredentials.map((cred) => (
-                  <p key={cred.username} className="text-blue-700">
-                    {cred.username} / {cred.password}
-                  </p>
-                ))}
+                {demoLoading ? (
+                  <p className="text-blue-700">Loading credentials...</p>
+                ) : (
+                  <div className="max-h-40 overflow-y-auto pr-1">
+                    {selectedRoleCredentials.map((cred) => (
+                      <p key={cred.username} className="text-blue-700">
+                        {cred.username} / {cred.password}
+                      </p>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           </div>

@@ -13,6 +13,7 @@ import 'network/api_client.dart';
 import 'services/audio_capture_service.dart';
 import 'services/connectivity_service.dart';
 import 'services/device_context_service.dart';
+import 'services/live_transcription_service.dart';
 import 'services/location_service.dart';
 import 'storage/local_ticket_queue_store.dart';
 
@@ -26,11 +27,15 @@ final locationServiceProvider = Provider<LocationService>((_) => LocationService
 final deviceContextServiceProvider =
     Provider<DeviceContextService>((ref) => DeviceContextService(connectivityService: ref.watch(connectivityServiceProvider)));
 final audioCaptureServiceProvider = Provider<AudioCaptureService>((_) => AudioCaptureService());
+final liveTranscriptionServiceProvider = Provider<LiveTranscriptionService>((_) => createLiveTranscriptionService());
 final ticketQueueStoreProvider = Provider<LocalTicketQueueStore>((_) => LocalTicketQueueStore());
 
 final voiceProviderRouterProvider = Provider<VoiceProviderRouter>((ref) {
   final config = ref.watch(appConfigProvider);
-  return VoiceProviderRouter(config);
+  return VoiceProviderRouter(
+    config,
+    apiClient: ref.watch(apiClientProvider),
+  );
 });
 
 final sttProviderProvider = Provider<SttProvider>((ref) => ref.watch(voiceProviderRouterProvider).resolveStt());

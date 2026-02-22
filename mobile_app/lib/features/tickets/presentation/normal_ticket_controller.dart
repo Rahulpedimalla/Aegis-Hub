@@ -1,6 +1,8 @@
-import 'package:flutter/foundation.dart';
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:record/record.dart';
 
 import '../../../core/providers.dart';
 import '../../../shared/models/location_point.dart';
@@ -41,6 +43,7 @@ class NormalTicketState {
     List<MediaAttachment>? videos,
     MediaAttachment? voiceNote,
     VoiceTranscript? voiceTranscript,
+    bool replaceVoice = false,
     LocationPoint? location,
     bool? isRecordingVoiceNote,
     bool? isSubmitting,
@@ -54,8 +57,9 @@ class NormalTicketState {
       description: description ?? this.description,
       images: images ?? this.images,
       videos: videos ?? this.videos,
-      voiceNote: clearVoice ? null : (voiceNote ?? this.voiceNote),
-      voiceTranscript: clearVoice ? null : (voiceTranscript ?? this.voiceTranscript),
+      voiceNote: clearVoice ? null : (replaceVoice ? voiceNote : (voiceNote ?? this.voiceNote)),
+      voiceTranscript:
+          clearVoice ? null : (replaceVoice ? voiceTranscript : (voiceTranscript ?? this.voiceTranscript)),
       location: location ?? this.location,
       isRecordingVoiceNote: isRecordingVoiceNote ?? this.isRecordingVoiceNote,
       isSubmitting: isSubmitting ?? this.isSubmitting,
@@ -74,51 +78,84 @@ class NormalTicketController extends StateNotifier<NormalTicketState> {
 
   final Ref _ref;
   final ImagePicker _picker;
+  StreamSubscription<Amplitude>? _amplitudeSubscription;
+  DateTime? _voiceStartAt;
+  DateTime? _lastSpeechAt;
+  bool _heardSpeech = false;
+  bool _autoStopping = false;
 
   void setDescription(String description) {
     state = state.copyWith(description: description, clearError: true);
   }
 
   Future<void> refreshLocation() async {
-    final location = await _ref.read(locationServiceProvider).getCurrentLocation();
-    state = state.copyWith(location: location);
+    try {
+      final location = await _ref.read(locationServiceProvider).getCurrentLocation();
+      state = state.copyWith(location: location, clearError: true);
+    } catch (_) {
+      state = state.copyWith(errorMessage: 'Unable to refresh location right now.');
+    }
   }
 
   Future<void> pickImages() async {
-    final files = await _picker.pickMultiImage(imageQuality: 85);
-    if (files.isEmpty) {
-      return;
+    try {
+      final files = await _picker.pickMultiImage(imageQuality: 85);
+      if (files.isEmpty) {
+        return;
+      }
+      final attachments = <MediaAttachment>[];
+      for (final file in files) {
+        final bytes = await file.readAsBytes();
+        attachments.add(
+          await MediaAttachment.fromBytes(
+            bytes: bytes,
+            path: file.path,
+            fileName: file.name,
+            mimeType: 'image/jpeg',
+            kind: MediaKind.image,
+          ),
+        );
+      }
+      state = state.copyWith(images: [...state.images, ...attachments], clearError: true);
+    } catch (_) {
+      state = state.copyWith(errorMessage: 'Could not access image picker on this device/browser.');
     }
-    final attachments = <MediaAttachment>[];
-    for (final file in files) {
-      final bytes = await file.readAsBytes();
-      attachments.add(
-        await MediaAttachment.fromBytes(
-          bytes: bytes,
-          path: file.path,
-          fileName: file.name,
-          mimeType: 'image/jpeg',
-          kind: MediaKind.image,
-        ),
-      );
-    }
-    state = state.copyWith(images: [...state.images, ...attachments], clearError: true);
   }
 
   Future<void> pickVideo() async {
-    final file = await _picker.pickVideo(source: ImageSource.gallery, maxDuration: const Duration(minutes: 2));
-    if (file == null) {
+    try {
+      final file = await _picker.pickVideo(source: ImageSource.gallery, maxDuration: const Duration(minutes: 2));
+      if (file == null) {
+        return;
+      }
+      final bytes = await file.readAsBytes();
+      final attachment = await MediaAttachment.fromBytes(
+        bytes: bytes,
+        path: file.path,
+        fileName: file.name,
+        mimeType: 'video/mp4',
+        kind: MediaKind.video,
+      );
+      state = state.copyWith(videos: [...state.videos, attachment], clearError: true);
+    } catch (_) {
+      state = state.copyWith(errorMessage: 'Could not access video picker on this device/browser.');
+    }
+  }
+
+  void removeImageAt(int index) {
+    if (index < 0 || index >= state.images.length) {
       return;
     }
-    final bytes = await file.readAsBytes();
-    final attachment = await MediaAttachment.fromBytes(
-      bytes: bytes,
-      path: file.path,
-      fileName: file.name,
-      mimeType: 'video/mp4',
-      kind: MediaKind.video,
-    );
-    state = state.copyWith(videos: [...state.videos, attachment], clearError: true);
+    final next = [...state.images]..removeAt(index);
+    state = state.copyWith(images: next, clearError: true);
+  }
+
+  void removeVideoAt(int index) {
+    if (index < 0 || index >= state.videos.length) {
+      return;
+    }
+    final next = [...state.videos]..removeAt(index);
+    state = state.copyWith(videos: next, clearError: true);
   }
 
   Future<void> startVoiceNote() async {
@@ -130,6 +167,9 @@ class NormalTicketController extends StateNotifier<NormalTicketState> {
       state = state.copyWith(errorMessage: 'Unable to start voice note recording.');
       return;
     }
+    // Best-effort live STT fallback for browsers where file transcription may fail.
+    await _ref.read(liveTranscriptionServiceProvider).start(localeId: 'en_IN');
+    _startSilenceMonitor();
     state = state.copyWith(isRecordingVoiceNote: true, clearError: true);
   }
 
@@ -137,29 +177,62 @@ class NormalTicketController extends StateNotifier<NormalTicketState> {
     if (!state.isRecordingVoiceNote) {
       return;
     }
-    try {
-      final path = await _ref.read(audioCaptureServiceProvider).stopRecording();
-      if (path == null || path.isEmpty) {
-        state = state.copyWith(isRecordingVoiceNote: false);
-        return;
-      }
-
-      MediaAttachment? attachment;
-      if (!kIsWeb) {
-        attachment = await MediaAttachment.fromPath(
-          path: path,
-          fileName: 'voice_note.m4a',
-          mimeType: 'audio/m4a',
-          kind: MediaKind.audio,
-        );
-      }
-
-      final transcript = await _ref.read(sttProviderProvider).transcribeFile(audioPath: path);
+    _stopSilenceMonitor();
+    final liveTranscript = await _ref.read(liveTranscriptionServiceProvider).stopAndCollect();
+    final recording = await _ref.read(audioCaptureServiceProvider).stopRecording();
+    if ((recording?.path ?? '').isEmpty) {
       state = state.copyWith(
         isRecordingVoiceNote: false,
+      );
+      return;
+    }
+
+    try {
+      final attachment = await MediaAttachment.fromRecordingPath(
+        path: recording!.path,
+        fileName: recording.fileName,
+        mimeType: recording.mimeType,
+        kind: MediaKind.audio,
+      );
+
+      VoiceTranscript? transcript;
+      String? warningMessage;
+      try {
+        transcript = await _ref.read(sttProviderProvider).transcribeFile(
+              audioPath: recording.path,
+              audioMimeType: recording.mimeType,
+              audioFileName: recording.fileName,
+            );
+        if ((transcript.rawText).trim().isEmpty) {
+          transcript = null;
+          warningMessage = 'Voice note saved, but no transcript was produced.';
+        }
+      } catch (_) {
+        warningMessage = 'Voice note saved, but transcription is unavailable right now.';
+      }
+      if (transcript == null && liveTranscript.isNotEmpty) {
+        transcript = VoiceTranscript(
+          rawText: liveTranscript,
+          provider: 'browser_live_stt',
+          model: 'speech_to_text',
+          language: 'en-IN',
+        );
+        warningMessage = null;
+      }
+
+      final mergedDescription = _mergeTranscriptIntoDescription(
+        currentText: state.description,
+        transcriptText: transcript?.rawText ?? '',
+      );
+
+      state = state.copyWith(
+        isRecordingVoiceNote: false,
+        description: mergedDescription,
         voiceNote: attachment,
         voiceTranscript: transcript,
-        clearError: true,
+        replaceVoice: true,
+        errorMessage: warningMessage,
+        clearError: warningMessage == null,
       );
     } catch (_) {
       state = state.copyWith(
@@ -177,7 +250,7 @@ class NormalTicketController extends StateNotifier<NormalTicketState> {
     if (state.isSubmitting) {
       return;
     }
-    if (state.description.trim().isEmpty && state.voiceTranscript == null) {
+    if (state.description.trim().isEmpty && state.voiceTranscript == null && state.voiceNote == null) {
       state = state.copyWith(errorMessage: 'Add text or voice note before submitting.');
       return;
     }
@@ -189,7 +262,7 @@ class NormalTicketController extends StateNotifier<NormalTicketState> {
       ticketType: TicketType.normal,
       text: state.description.trim().isNotEmpty
           ? state.description.trim()
-          : (state.voiceTranscript?.rawText ?? ''),
+          : (state.voiceTranscript?.rawText ?? (state.voiceNote != null ? 'Voice note attached by reporter.' : '')),
       location: location,
       deviceInfo: device,
       timestampUtc: DateTime.now().toUtc(),
@@ -221,6 +294,77 @@ class NormalTicketController extends StateNotifier<NormalTicketState> {
         errorMessage: 'Ticket submission failed. Please retry.',
       );
     }
+  }
+
+  String _mergeTranscriptIntoDescription({
+    required String currentText,
+    required String transcriptText,
+  }) {
+    final normalizedCurrent = currentText.trim();
+    final normalizedTranscript = transcriptText.trim();
+    if (normalizedTranscript.isEmpty) {
+      return currentText;
+    }
+    if (normalizedCurrent.isEmpty) {
+      return normalizedTranscript;
+    }
+    if (normalizedCurrent.toLowerCase().contains(normalizedTranscript.toLowerCase())) {
+      return currentText;
+    }
+    return '$normalizedCurrent\n$normalizedTranscript';
+  }
+
+  void _startSilenceMonitor() {
+    _stopSilenceMonitor();
+    _voiceStartAt = DateTime.now().toUtc();
+    _lastSpeechAt = _voiceStartAt;
+    _heardSpeech = false;
+    _autoStopping = false;
+
+    _amplitudeSubscription = _ref
+        .read(audioCaptureServiceProvider)
+        .onAmplitudeChanged(const Duration(milliseconds: 250))
+        .listen((amplitude) async {
+      if (_autoStopping || !state.isRecordingVoiceNote || state.isSubmitting) {
+        return;
+      }
+
+      final now = DateTime.now().toUtc();
+      final dbfs = amplitude.current;
+      final isSpeechFrame = dbfs > -45;
+      if (isSpeechFrame) {
+        _heardSpeech = true;
+        _lastSpeechAt = now;
+        return;
+      }
+
+      if (!_heardSpeech || _lastSpeechAt == null || _voiceStartAt == null) {
+        return;
+      }
+
+      final silenceFor = now.difference(_lastSpeechAt!);
+      final recordingFor = now.difference(_voiceStartAt!);
+      if (recordingFor >= const Duration(seconds: 2) && silenceFor >= const Duration(seconds: 3)) {
+        _autoStopping = true;
+        await stopVoiceNote();
+      }
+    });
+  }
+
+  void _stopSilenceMonitor() {
+    _amplitudeSubscription?.cancel();
+    _amplitudeSubscription = null;
+    _voiceStartAt = null;
+    _lastSpeechAt = null;
+    _heardSpeech = false;
+    _autoStopping = false;
+  }
+
+  @override
+  void dispose() {
+    _stopSilenceMonitor();
+    _ref.read(liveTranscriptionServiceProvider).cancel();
+    super.dispose();
   }
 }
 

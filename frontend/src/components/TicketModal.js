@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { X, MapPin, Users, Clock, AlertTriangle, CheckCircle, Navigation, Building, Heart, ExternalLink } from 'lucide-react';
+import { X, MapPin, Users, Clock, AlertTriangle, CheckCircle, Navigation, Building, Heart, ExternalLink, Volume2 } from 'lucide-react';
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
@@ -18,9 +18,12 @@ const TicketModal = ({ ticket, isOpen, onClose, onStatusUpdate, canEdit = true }
   const [notes, setNotes] = useState(ticket.notes || '');
   const [nearestFacilities, setNearestFacilities] = useState(null);
   const [loadingFacilities, setLoadingFacilities] = useState(false);
+  const [ticketMedia, setTicketMedia] = useState(null);
+  const [loadingMedia, setLoadingMedia] = useState(false);
 
   const statusOptions = [
     { value: 'Pending', label: 'Pending', icon: Clock, color: 'bg-yellow-100 text-yellow-800' },
+    { value: 'Pending Assignment', label: 'Pending Assignment', icon: AlertTriangle, color: 'bg-orange-100 text-orange-800' },
     { value: 'In Progress', label: 'In Progress', icon: AlertTriangle, color: 'bg-blue-100 text-blue-800' },
     { value: 'Done', label: 'Done', icon: CheckCircle, color: 'bg-green-100 text-green-800' },
     { value: 'Cancelled', label: 'Cancelled', icon: X, color: 'bg-gray-100 text-gray-800' }
@@ -61,11 +64,52 @@ const TicketModal = ({ ticket, isOpen, onClose, onStatusUpdate, canEdit = true }
     }
   }, [ticket?.id]);
 
+  const fetchTicketMedia = useCallback(async () => {
+    if (!ticket?.id) return;
+    try {
+      setLoadingMedia(true);
+      const response = await axios.get(`/api/sos/${ticket.id}/media`);
+      setTicketMedia(response.data || null);
+    } catch (error) {
+      console.error('Error fetching ticket media:', error);
+      setTicketMedia(null);
+    } finally {
+      setLoadingMedia(false);
+    }
+  }, [ticket?.id]);
+
   useEffect(() => {
     if (isOpen && ticket) {
       fetchNearestFacilities();
+      fetchTicketMedia();
     }
-  }, [isOpen, ticket, fetchNearestFacilities]);
+  }, [isOpen, ticket, fetchNearestFacilities, fetchTicketMedia]);
+
+  useEffect(() => {
+    setStatus(ticket.status);
+    setNotes(ticket.notes || '');
+  }, [ticket]);
+
+  const parseServerDateTime = (value) => {
+    const raw = (value ?? '').toString().trim();
+    if (!raw) return null;
+    const hasTimezone = /(z|[+-]\d{2}:?\d{2})$/i.test(raw);
+    const normalized = hasTimezone ? raw : `${raw}Z`;
+    const date = new Date(normalized);
+    return Number.isNaN(date.getTime()) ? null : date;
+  };
+
+  const reportedAtText = (() => {
+    const parsed = parseServerDateTime(ticket?.timestamp || ticket?.created_at);
+    return parsed ? parsed.toLocaleString() : 'N/A';
+  })();
+  const voiceTranscriptText = (ticketMedia?.voice_transcript || '').toString().trim();
+  const ticketDescriptionText = (ticket?.text || '').toString().trim();
+  const descriptionText = voiceTranscriptText || ticketDescriptionText;
+  const hasDifferentReporterText =
+    Boolean(voiceTranscriptText) &&
+    Boolean(ticketDescriptionText) &&
+    voiceTranscriptText.toLowerCase() !== ticketDescriptionText.toLowerCase();
 
   if (!isOpen) return null;
 
@@ -127,20 +171,63 @@ const TicketModal = ({ ticket, isOpen, onClose, onStatusUpdate, canEdit = true }
                     </div>
                     <div className="flex items-center space-x-2">
                       <Clock className="w-4 h-4 text-gray-500" />
-                      <span>Reported: {new Date(ticket.created_at).toLocaleString()}</span>
+                      <span>Reported: {reportedAtText}</span>
                     </div>
                   </div>
                 </div>
 
                 {/* Description */}
-                {ticket.text && (
+                {descriptionText && (
                   <div>
                     <h4 className="font-medium text-gray-900 mb-2">Description</h4>
-                    <div className="bg-gray-50 p-3 rounded-lg">
-                      <p className="text-sm text-gray-600">{ticket.text}</p>
+                    <div className="bg-gray-50 p-3 rounded-lg space-y-2">
+                      {voiceTranscriptText && (
+                        <p className="text-xs font-semibold text-gray-500">Transcribed from voice message</p>
+                      )}
+                      <p className="text-sm text-gray-600">{descriptionText}</p>
+                      {hasDifferentReporterText && (
+                        <p className="text-xs text-gray-500">
+                          Original typed text: {ticketDescriptionText}
+                        </p>
+                      )}
                     </div>
                   </div>
                 )}
+
+                <div>
+                  <h4 className="font-medium text-gray-900 mb-2">Voice Evidence</h4>
+                  {loadingMedia ? (
+                    <div className="bg-gray-50 p-3 rounded-lg">
+                      <p className="text-sm text-gray-600">Loading voice attachments...</p>
+                    </div>
+                  ) : ticketMedia && ((ticketMedia.audio_files || []).length > 0 || ticketMedia.voice_transcript) ? (
+                    <div className="bg-gray-50 p-3 rounded-lg space-y-3">
+                      {ticketMedia.voice_transcript && (
+                        <div>
+                          <p className="text-xs font-semibold text-gray-500 mb-1">Transcript</p>
+                          <p className="text-sm text-gray-700">{ticketMedia.voice_transcript}</p>
+                        </div>
+                      )}
+
+                      {(ticketMedia.audio_files || []).map((item, index) => (
+                        <div key={`${item.relative_path || item.url || 'audio'}-${index}`} className="space-y-1">
+                          <div className="flex items-center space-x-2 text-sm text-gray-700">
+                            <Volume2 className="w-4 h-4 text-gray-500" />
+                            <span>{item.file_name || `Voice ${index + 1}`}</span>
+                          </div>
+                          <audio controls preload="none" className="w-full">
+                            <source src={item.url} type={item.content_type || 'audio/wav'} />
+                            Your browser does not support audio playback.
+                          </audio>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="bg-gray-50 p-3 rounded-lg">
+                      <p className="text-sm text-gray-600">No voice recording attached to this ticket.</p>
+                    </div>
+                  )}
+                </div>
 
                 {/* Location */}
                 <div>
@@ -199,11 +286,11 @@ const TicketModal = ({ ticket, isOpen, onClose, onStatusUpdate, canEdit = true }
                 </div>
 
                 {/* Assignment */}
-                {ticket.assigned_to && (
+                {(ticket.assigned_to || ticket.assigned_to_name) && (
                   <div>
                     <h4 className="font-medium text-gray-900 mb-2">Assigned To</h4>
                     <div className="bg-blue-50 p-3 rounded-lg">
-                      <p className="text-blue-800">{ticket.assigned_to}</p>
+                      <p className="text-blue-800">{ticket.assigned_to_name || ticket.assigned_to}</p>
                     </div>
                   </div>
                 )}

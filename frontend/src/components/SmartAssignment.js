@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useAuth } from '../contexts/AuthContext';
+import { SOS_CHANGED_EVENT } from '../utils/sosRealtime';
 
 const SmartAssignment = ({ sosId, onAssignmentUpdate }) => {
     const { user } = useAuth();
@@ -47,6 +48,16 @@ const SmartAssignment = ({ sosId, onAssignmentUpdate }) => {
     }, [fetchSmartAssignment]);
 
     useEffect(() => {
+        const onSosChanged = () => {
+            fetchSmartAssignment();
+        };
+        window.addEventListener(SOS_CHANGED_EVENT, onSosChanged);
+        return () => {
+            window.removeEventListener(SOS_CHANGED_EVENT, onSosChanged);
+        };
+    }, [fetchSmartAssignment]);
+
+    useEffect(() => {
         if (!assignment || assignment?.sos_request?.status !== 'Pending Assignment' || timeRemaining == null) {
             return;
         }
@@ -68,6 +79,7 @@ const SmartAssignment = ({ sosId, onAssignmentUpdate }) => {
     const isPending = status === 'Pending';
     const isPendingAssignment = status === 'Pending Assignment';
     const isInProgress = status === 'In Progress';
+    const assignedOrganizationId = assignment?.sos_request?.assigned_organization || recommendedOrganization?.id;
 
     const scoreBadgeClass = useMemo(() => {
         const score = assignment?.assignment_score || 0;
@@ -114,6 +126,10 @@ const SmartAssignment = ({ sosId, onAssignmentUpdate }) => {
             toast.error('Please provide estimated completion time');
             return;
         }
+        if (!assignedOrganizationId) {
+            toast.error('No assigned organization available');
+            return;
+        }
         const ready = await prepareAssignmentWindow();
         if (!ready) return;
 
@@ -121,7 +137,7 @@ const SmartAssignment = ({ sosId, onAssignmentUpdate }) => {
             setAccepting(true);
             await axios.post('/api/emergency/accept-assignment', {
                 sos_id: sosId,
-                organization_id: recommendedOrganization.id,
+                organization_id: assignedOrganizationId,
                 estimated_completion: estimatedCompletion
             });
             toast.success('Assignment accepted successfully');
@@ -129,13 +145,21 @@ const SmartAssignment = ({ sosId, onAssignmentUpdate }) => {
             onAssignmentUpdate && onAssignmentUpdate();
         } catch (error) {
             console.error('Error accepting assignment:', error);
-            toast.error(error.response?.data?.detail || 'Failed to accept assignment');
+            const detail = error.response?.data?.detail;
+            const message = typeof detail === 'string'
+                ? detail
+                : (detail?.message || 'Failed to accept assignment');
+            toast.error(message);
         } finally {
             setAccepting(false);
         }
     };
 
     const rejectAssignment = async () => {
+        if (!assignedOrganizationId) {
+            toast.error('No assigned organization available');
+            return;
+        }
         const ready = await prepareAssignmentWindow();
         if (!ready) return;
 
@@ -143,15 +167,19 @@ const SmartAssignment = ({ sosId, onAssignmentUpdate }) => {
             setRejecting(true);
             await axios.post('/api/emergency/reject-assignment', {
                 sos_id: sosId,
-                organization_id: recommendedOrganization.id,
+                organization_id: assignedOrganizationId,
                 reason: 'Organization unavailable'
             });
-            toast.success('Assignment rejected. Finding next best team...');
+            toast.success('Assignment rejected and reassigned.');
             await fetchSmartAssignment();
             onAssignmentUpdate && onAssignmentUpdate();
         } catch (error) {
             console.error('Error rejecting assignment:', error);
-            toast.error(error.response?.data?.detail || 'Failed to reject assignment');
+            const detail = error.response?.data?.detail;
+            const message = typeof detail === 'string'
+                ? detail
+                : (detail?.message || 'Failed to reject assignment');
+            toast.error(message);
         } finally {
             setRejecting(false);
         }

@@ -1,8 +1,10 @@
 import json
 import os
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
@@ -10,15 +12,21 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from database import (
+    Division,
     MobileDispatchAttempt,
     MobileIncident,
+    Organization,
     SOSRequest,
+    Staff,
     TicketCreationRecord,
     get_db,
 )
+from services.assignment_service import recommend_assignment
 from services.gemini_service import gemini_chat_followup_response, gemini_transcribe_audio
 from services.mobile_ai_pipeline_service import build_ai_incident_bundle
 from services.mobile_dispatch_service import dispatch_ticket_with_retry
+from services.triage_service import triage_sos
+from services.workload_service import transfer_assignment_workload
 
 router = APIRouter()
 
@@ -92,26 +100,86 @@ def _now_iso() -> str:
     return datetime.utcnow().isoformat()
 
 
-def _fallback_follow_up_reply(text: str) -> str:
-    lower = text.lower()
-    if "injur" in lower or "bleed" in lower:
+def _contains_any(text: str, keywords: List[str]) -> bool:
+    normalized = (text or "").lower()
+    return any(key in normalized for key in keywords)
+
+
+def _extract_people_hint(text: str) -> Optional[int]:
+    matches = re.findall(r"(\d{1,4})\s*(people|persons|injured|trapped)?", text or "", flags=re.IGNORECASE)
+    values = []
+    for match in matches:
+        try:
+            value = int(match[0])
+            if 0 < value <= 10000:
+                values.append(value)
+        except Exception:
+            continue
+    return max(values) if values else None
+
+
+def _fallback_follow_up_reply(
+    text: str,
+    incident_summary: str = "",
+    history: Optional[List[Dict[str, str]]] = None,
+) -> str:
+    history = history or []
+    assistant_history = " ".join(
+        str(item.get("text") or "")
+        for item in history
+        if str(item.get("role") or "").lower() == "assistant"
+    ).lower()
+    user_history = " ".join(
+        str(item.get("text") or "")
+        for item in history
+        if str(item.get("role") or "").lower() == "user"
+    ).lower()
+    combined = f"{incident_summary} {user_history} {text}".lower()
+    people_hint = _extract_people_hint(combined)
+
+    has_injury = _contains_any(combined, ["injur", "bleed", "unconscious", "fracture", "burn"])
+    has_fire = _contains_any(combined, ["fire", "smoke", "flame", "burning", "gas leak"])
+    has_flood = _contains_any(combined, ["flood", "water", "submerged", "inundat", "boat", "drown"])
+
+    if has_injury:
+        opening = "If you are safe, give direct pressure to heavy bleeding and keep injured people warm."
+        if has_flood:
+            opening = "Move to higher ground first, then give direct pressure to heavy bleeding if safe."
+        elif has_fire:
+            opening = "Move away from smoke first, then give direct pressure to heavy bleeding if safe."
+
+        default_question = "How many people are unconscious or bleeding heavily right now?"
+        alt_question = "Can you share the count of severe injuries and if evacuation is possible?"
+        question = alt_question if default_question.lower() in assistant_history else default_question
+
+        if people_hint and people_hint > 1 and "severe injuries" in question.lower():
+            return f"{opening} You reported around {people_hint} affected. {question}"
+        return f"{opening} Avoid moving head, neck, or spine injuries unless there is immediate danger. {question}"
+
+    if has_fire:
+        default_question = "Are exits blocked or is anyone trapped inside?"
+        alt_question = "Can you confirm smoke level and whether evacuation routes are open?"
+        question = alt_question if default_question.lower() in assistant_history else default_question
         return (
-            "If safe, apply pressure to active bleeding and avoid moving severe injuries. "
-            "How many injured people are currently with you?"
+            "Move upwind, stay low under smoke, and switch off nearby gas or electrical sources only if safe. "
+            f"{question}"
         )
-    if "fire" in lower or "smoke" in lower:
+
+    if has_flood:
+        default_question = "What is the current water depth and can boats reach your location?"
+        alt_question = "Can you share nearest landmark and whether water level is rising?"
+        question = alt_question if default_question.lower() in assistant_history else default_question
         return (
-            "Move upwind and stay clear of enclosed smoke exposure. "
-            "Are exits blocked or is anyone trapped inside?"
+            "Move to higher ground and avoid crossing fast water or live electric lines. "
+            f"{question}"
         )
-    if "flood" in lower or "water" in lower:
-        return (
-            "Move to higher ground and avoid crossing moving water. "
-            "What is current water depth near your location?"
-        )
+
+    default_question = "Can you confirm injury count and immediate hazards around you?"
+    alt_question = "Share your exact landmark and whether children or elderly need priority evacuation."
+    question = alt_question if default_question.lower() in assistant_history else default_question
     return (
-        "Stay in the safest reachable position and avoid isolated movement. "
-        "Can you confirm injury count and immediate hazards around you?"
+        "Stay in the safest reachable position, keep your phone charged, and avoid isolated movement. "
+        f"{question}"
     )
 
 
@@ -142,12 +210,17 @@ def _generate_ai_chat_reply(
     history: List[Dict[str, str]],
     user_text: str,
 ) -> str:
+    incident_summary = incident.description_summary or incident.incident_type or "Emergency report"
     ai_reply = gemini_chat_followup_response(
-        incident_summary=incident.description_summary or incident.incident_type or "Emergency report",
+        incident_summary=incident_summary,
         recent_messages=history,
         latest_user_message=user_text,
     )
-    return ai_reply or _fallback_follow_up_reply(user_text)
+    return ai_reply or _fallback_follow_up_reply(
+        text=user_text,
+        incident_summary=incident_summary,
+        history=history,
+    )
 
 
 def _create_ticket_from_payload(
@@ -174,27 +247,91 @@ def _create_ticket_from_payload(
     if existing_sos:
         ticket_id = str(existing_sos.id)
     else:
-        priority_score = int(payload.get("priority_score", 50) or 50)
+        try:
+            priority_score = int(payload.get("priority_score", 50) or 50)
+        except Exception:
+            priority_score = 50
         mapped_priority = max(1, min(5, int(round(priority_score / 20.0))))
+        input_text = str(payload.get("text") or "").strip()
+        summary_text = str(payload.get("summary") or "").strip()
+        voice_transcript = str(payload.get("voice_transcript") or "").strip()
+        description_text = voice_transcript or input_text or summary_text or "Mobile incident"
+        try:
+            people_hint = max(1, int(payload.get("people", 1) or 1))
+        except Exception:
+            people_hint = 1
+        longitude = float(payload.get("longitude", 0) or 0)
+        latitude = float(payload.get("latitude", 0) or 0)
+        place = str(payload.get("place") or "Unknown")
+        incident_type = str(payload.get("incident_type") or payload.get("category_hint") or "General Emergency")
+
+        triage = triage_sos(
+            text=description_text,
+            voice_transcript=voice_transcript or description_text,
+            people=people_hint,
+            category_hint=incident_type,
+            place=place,
+        )
+        people = max(1, int(triage.get("people") or people_hint))
+        triage_priority = max(1, min(5, int(triage.get("priority") or mapped_priority)))
+        final_priority = max(mapped_priority, triage_priority)
+        scored = recommend_assignment(
+            SimpleNamespace(latitude=latitude, longitude=longitude, category=triage["category"]),
+            db.query(Organization).all(),
+            db.query(Staff).all(),
+            db.query(Division).all(),
+            triage_context=triage,
+        )
+        recommended = scored.get("recommended_assignment", {})
+        org = recommended.get("organization")
+        staff = recommended.get("staff")
+        division = recommended.get("division")
+
+        assigned_organization = org["id"] if org else None
+        assigned_staff = staff["id"] if staff else None
+        assigned_division = division["id"] if division else None
+        auto_assigned = bool(assigned_organization and assigned_staff)
+        initial_status = "Pending Assignment" if auto_assigned else "Pending"
         sos = SOSRequest(
             external_id=external_id,
-            status="Pending",
-            people=max(1, int(payload.get("people", 1) or 1)),
-            longitude=float(payload.get("longitude", 0) or 0),
-            latitude=float(payload.get("latitude", 0) or 0),
-            text=str(payload.get("text") or payload.get("summary") or "Mobile incident"),
-            place=str(payload.get("place") or "Unknown"),
-            category=str(payload.get("incident_type") or payload.get("category_hint") or "General Emergency"),
-            priority=mapped_priority,
+            status=initial_status,
+            people=people,
+            longitude=longitude,
+            latitude=latitude,
+            text=description_text,
+            place=place,
+            category=triage["category"],
+            priority=final_priority,
+            assigned_to=assigned_staff,
+            assigned_organization=assigned_organization,
+            assigned_division=assigned_division,
+            assignment_time=datetime.utcnow() if auto_assigned else None,
             notes=(
                 f"source=mobile_ticket_creation_endpoint; "
                 f"idempotency_key={idempotency_key}; "
                 f"client_ip={client_ip}; "
-                f"fraud_risk={payload.get('fraud_risk_score', 0)}"
+                f"fraud_risk={payload.get('fraud_risk_score', 0)}; "
+                f"triage_source={triage.get('source', 'rules')}; "
+                f"description_source={'voice' if voice_transcript else 'text'}; "
+                f"triage_priority={triage_priority}; "
+                f"mapped_priority={mapped_priority}; "
+                f"assignment_score={scored.get('assignment_score', 0)}"
             ),
             timestamp=_parse_datetime(payload.get("timestamp")),
         )
         db.add(sos)
+        db.flush()
+        if auto_assigned:
+            transfer_assignment_workload(
+                db=db,
+                old_org_id=None,
+                old_division_id=None,
+                old_staff_id=None,
+                new_org_id=assigned_organization,
+                new_division_id=assigned_division,
+                new_staff_id=assigned_staff,
+                sos_id=str(sos.id),
+            )
         db.commit()
         db.refresh(sos)
         ticket_id = str(sos.id)
@@ -429,7 +566,11 @@ async def mobile_ai_voice_agent(
             file=audio_file,
         )
         audio_reference = saved_audio.get("relative_path")
-        ai_transcript = gemini_transcribe_audio(saved_audio["disk_path"], language_hint="en")
+        ai_transcript = gemini_transcribe_audio(
+            saved_audio["disk_path"],
+            language_hint="en-IN",
+            audio_mime_type=saved_audio.get("content_type"),
+        )
         if ai_transcript:
             transcript = ai_transcript.strip()
 
@@ -447,6 +588,34 @@ async def mobile_ai_voice_agent(
         "incident_id": incident.external_id or incident.id,
         "priority_score": incident.priority_score,
         "audio_reference": audio_reference,
+    }
+
+
+@router.post("/ai/transcribe")
+async def mobile_ai_transcribe(
+    audio_file: UploadFile = File(...),
+    language_hint: str = Form(default="en-IN"),
+):
+    if not audio_file:
+        raise HTTPException(status_code=400, detail="audio_file is required")
+
+    saved_audio = await _save_upload(
+        incident_ref=f"TRANSCRIBE-{uuid.uuid4().hex[:12].upper()}",
+        bucket="transcribe_audio",
+        file=audio_file,
+    )
+    transcript = gemini_transcribe_audio(
+        saved_audio["disk_path"],
+        language_hint=language_hint or "en-IN",
+        audio_mime_type=saved_audio.get("content_type"),
+    )
+    cleaned = (transcript or "").strip()
+    return {
+        "transcript": cleaned,
+        "audio_reference": saved_audio.get("relative_path"),
+        "provider": "gemini" if cleaned else "unavailable",
+        "language": language_hint or "en-IN",
+        "warning": None if cleaned else "Transcription unavailable for this audio/configuration",
     }
 
 

@@ -19,6 +19,8 @@ abstract class ChatRepository {
   Future<ChatSendResult> sendVoiceMessage({
     required String chatSessionId,
     String? audioPath,
+    String? audioMimeType,
+    String? audioFileName,
     String? textHint,
   });
 }

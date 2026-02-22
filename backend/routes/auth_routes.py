@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from passlib.context import CryptContext
 from jose import JWTError, jwt
 from datetime import datetime, timedelta
-from typing import Optional, List, Callable
+from typing import Optional, List, Callable, Dict
 import uuid
 import os
 
@@ -281,3 +281,43 @@ async def update_user_role(
     db.commit()
     
     return {"message": f"User role updated to {new_role}"}
+
+
+@router.get("/demo-credentials")
+async def get_demo_credentials(db: Session = Depends(get_db)):
+    """
+    Return demo login credentials by role.
+    Passwords are the seeded demo defaults used by init_db.py.
+    """
+    password_by_role: Dict[str, str] = {
+        "admin": "admin123",
+        "responder": "responder123",
+        "viewer": "viewer123",
+    }
+    supported_roles = set(password_by_role.keys())
+
+    users = (
+        db.query(User)
+        .filter(User.is_active.is_(True))
+        .order_by(User.role.asc(), User.username.asc())
+        .all()
+    )
+
+    credentials: Dict[str, List[Dict[str, str]]] = {
+        "admin": [],
+        "responder": [],
+        "viewer": [],
+    }
+
+    for user in users:
+        role = (user.role or "").lower().strip()
+        if role not in supported_roles:
+            continue
+        credentials[role].append(
+            {
+                "username": user.username,
+                "password": password_by_role[role],
+            }
+        )
+
+    return {"credentials": credentials}

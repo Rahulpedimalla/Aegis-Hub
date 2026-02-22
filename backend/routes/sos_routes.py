@@ -1,22 +1,121 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+import json
+import asyncio
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import func, text
-from typing import List, Optional
+from sqlalchemy import func, or_, text
+from typing import Dict, List, Optional
 import math
 from datetime import datetime
 from types import SimpleNamespace
 
-from database import get_db, SOSRequest, Organization, Staff, Division, TicketUpdate
+from database import SessionLocal, User, get_db, SOSRequest, Organization, Staff, Division, TicketUpdate, MobileIncident
 from models import SOSRequestCreate, SOSRequestUpdate, SOSRequestResponse, SOSMapData, TicketUpdateCreate, SOSIntakeRequest
 import uuid
 from database import Shelter, Hospital
-from routes.auth_routes import require_roles
+from routes.auth_routes import get_current_user, require_roles, verify_token
 from services.assignment_service import recommend_assignment
 from services.geo_utils import infer_telangana_anchor
+from services.staff_resolution_service import resolve_responder_staff
 from services.triage_service import triage_sos
 from services.workload_service import release_assignment_workload, transfer_assignment_workload
 
 router = APIRouter()
+
+
+def _extract_stream_token(authorization: Optional[str], access_token: Optional[str]) -> Optional[str]:
+    query_token = str(access_token or "").strip()
+    if query_token:
+        return query_token
+
+    header_value = str(authorization or "").strip()
+    if header_value.lower().startswith("bearer "):
+        token = header_value.split(" ", 1)[1].strip()
+        if token:
+            return token
+    return None
+
+
+def _resolve_stream_user(
+    db: Session,
+    authorization: Optional[str],
+    access_token: Optional[str],
+) -> User:
+    token = _extract_stream_token(authorization=authorization, access_token=access_token)
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing stream token")
+
+    username = verify_token(token)
+    if not username:
+        raise HTTPException(status_code=401, detail="Invalid stream token")
+
+    user = (
+        db.query(User)
+        .filter(User.username == username, User.is_active.is_(True))
+        .first()
+    )
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    if (user.role or "").lower() not in {"admin", "responder"}:
+        raise HTTPException(status_code=403, detail="Access denied for stream")
+
+    return user
+
+
+def _sos_change_snapshot(db: Session) -> Dict[str, Optional[str]]:
+    total_tickets = int(db.query(func.count(SOSRequest.id)).scalar() or 0)
+    max_updated = db.query(func.max(SOSRequest.updated_at)).scalar()
+    max_created = db.query(func.max(SOSRequest.created_at)).scalar()
+    max_history_update = db.query(func.max(TicketUpdate.update_time)).scalar()
+
+    candidates = [item for item in [max_updated, max_created, max_history_update] if item is not None]
+    latest_change = max(candidates) if candidates else None
+    latest_change_text = latest_change.isoformat() if latest_change else ""
+
+    pending_count = int(db.query(func.count(SOSRequest.id)).filter(SOSRequest.status == "Pending").scalar() or 0)
+    pending_assignment_count = int(
+        db.query(func.count(SOSRequest.id)).filter(SOSRequest.status == "Pending Assignment").scalar() or 0
+    )
+    in_progress_count = int(db.query(func.count(SOSRequest.id)).filter(SOSRequest.status == "In Progress").scalar() or 0)
+
+    fingerprint = (
+        f"{total_tickets}|{latest_change_text}|{pending_count}|{pending_assignment_count}|{in_progress_count}"
+    )
+    return {
+        "fingerprint": fingerprint,
+        "latest_change_at": latest_change_text,
+        "total_tickets": total_tickets,
+        "pending": pending_count,
+        "pending_assignment": pending_assignment_count,
+        "in_progress": in_progress_count,
+    }
+
+
+def _to_static_media_url(request: Request, relative_path: str) -> Optional[str]:
+    normalized = str(relative_path or "").replace("\\", "/").strip().lstrip("/")
+    if not normalized:
+        return None
+    if normalized.startswith("static/"):
+        normalized = normalized[len("static/"):]
+    if not normalized.startswith("mobile_uploads/"):
+        return None
+    base = str(request.base_url).rstrip("/")
+    return f"{base}/static/{normalized}"
+
+
+def _mobile_incident_for_ticket(db: Session, sos: SOSRequest) -> Optional[MobileIncident]:
+    filters = [MobileIncident.dispatched_ticket_id == str(sos.id)]
+    if sos.external_id:
+        filters.append(MobileIncident.external_id == str(sos.external_id))
+
+    return (
+        db.query(MobileIncident)
+        .filter(or_(*filters))
+        .order_by(MobileIncident.created_at.desc())
+        .first()
+    )
 
 def calculate_distance(lat1, lon1, lat2, lon2):
     """Calculate distance between two coordinates using Haversine formula"""
@@ -90,6 +189,60 @@ def find_nearest_staff(sos_lat, sos_lon, category, db: Session):
     
     return nearest_staff
 
+
+def _ensure_assignment_for_active_ticket(db: Session, sos: SOSRequest) -> None:
+    """
+    Ensure active tickets are not left unassigned.
+    """
+    if sos.status not in ["Pending", "Pending Assignment"]:
+        return
+    if sos.assigned_to and sos.assigned_organization:
+        return
+
+    triage = triage_sos(
+        text=sos.text,
+        voice_transcript=None,
+        people=sos.people,
+        category_hint=sos.category,
+        place=sos.place,
+    )
+    scored = recommend_assignment(
+        SimpleNamespace(latitude=sos.latitude, longitude=sos.longitude, category=triage["category"]),
+        db.query(Organization).all(),
+        db.query(Staff).all(),
+        db.query(Division).all(),
+        triage_context=triage,
+    )
+    recommended = scored.get("recommended_assignment", {})
+    org = recommended.get("organization")
+    staff = recommended.get("staff")
+    division = recommended.get("division")
+    if not org or not staff:
+        return
+
+    old_org = sos.assigned_organization
+    old_div = sos.assigned_division
+    old_staff = sos.assigned_to
+    sos.assigned_organization = org.get("id")
+    sos.assigned_to = staff.get("id")
+    sos.assigned_division = division.get("id") if division else None
+    sos.status = "Pending Assignment"
+    sos.assignment_time = datetime.utcnow()
+    sos.updated_at = datetime.utcnow()
+
+    transfer_assignment_workload(
+        db=db,
+        old_org_id=old_org,
+        old_division_id=old_div,
+        old_staff_id=old_staff,
+        new_org_id=sos.assigned_organization,
+        new_division_id=sos.assigned_division,
+        new_staff_id=sos.assigned_to,
+        sos_id=str(sos.id),
+    )
+    db.commit()
+    db.refresh(sos)
+
 @router.post("/intake")
 async def intake_sos_request(
     payload: SOSIntakeRequest,
@@ -128,10 +281,11 @@ async def intake_sos_request(
         org = recommended.get("organization")
         staff = recommended.get("staff")
         division = recommended.get("division")
+        auto_assigned = bool(org and staff)
 
         db_sos = SOSRequest(
             external_id=external_id,
-            status="Pending",
+            status="Pending Assignment" if auto_assigned else "Pending",
             people=triage["people"],
             longitude=payload.longitude,
             latitude=payload.latitude,
@@ -142,6 +296,7 @@ async def intake_sos_request(
             assigned_organization=org["id"] if org else None,
             assigned_to=staff["id"] if staff else None,
             assigned_division=division["id"] if division else None,
+            assignment_time=datetime.utcnow() if auto_assigned else None,
             notes=(
                 f"source={payload.source}; triage_source={triage.get('source','rules')}; "
                 f"division_type={triage.get('division_type')}; urgency={triage['urgency_level']}; "
@@ -151,6 +306,18 @@ async def intake_sos_request(
         )
 
         db.add(db_sos)
+        db.flush()
+        if auto_assigned:
+            transfer_assignment_workload(
+                db=db,
+                old_org_id=None,
+                old_division_id=None,
+                old_staff_id=None,
+                new_org_id=db_sos.assigned_organization,
+                new_division_id=db_sos.assigned_division,
+                new_staff_id=db_sos.assigned_to,
+                sos_id=str(db_sos.id),
+            )
         db.commit()
         db.refresh(db_sos)
 
@@ -198,9 +365,11 @@ async def create_sos_request(
         org = recommended.get("organization")
         staff = recommended.get("staff")
         division = recommended.get("division")
+        auto_assigned = bool(org and staff)
         
         db_sos = SOSRequest(
             external_id=sos_data.external_id,
+            status="Pending Assignment" if auto_assigned else "Pending",
             people=triage["people"],
             longitude=sos_data.longitude,
             latitude=sos_data.latitude,
@@ -211,6 +380,7 @@ async def create_sos_request(
             assigned_organization=org["id"] if org else None,
             assigned_to=staff["id"] if staff else None,
             assigned_division=division["id"] if division else None,
+            assignment_time=datetime.utcnow() if auto_assigned else None,
             notes=(
                 f"triage_source={triage.get('source','rules')}; division_type={triage.get('division_type')}; "
                 f"urgency={triage['urgency_level']}; confidence={triage['confidence']}"
@@ -219,6 +389,18 @@ async def create_sos_request(
         )
         
         db.add(db_sos)
+        db.flush()
+        if auto_assigned:
+            transfer_assignment_workload(
+                db=db,
+                old_org_id=None,
+                old_division_id=None,
+                old_staff_id=None,
+                new_org_id=db_sos.assigned_organization,
+                new_division_id=db_sos.assigned_division,
+                new_staff_id=db_sos.assigned_to,
+                sos_id=str(db_sos.id),
+            )
         db.commit()
         db.refresh(db_sos)
         
@@ -251,10 +433,18 @@ async def get_sos_requests(
     priority: Optional[int] = Query(None, ge=1, le=5, description="Filter by priority"),
     limit: int = Query(100, le=1000, description="Number of records to return"),
     offset: int = Query(0, ge=0, description="Number of records to skip"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user),
 ):
     """Get SOS requests with filtering options"""
     query = db.query(SOSRequest)
+
+    if (current_user.role or "").lower() == "responder":
+        resolved_staff = resolve_responder_staff(current_user, db)
+        if not resolved_staff:
+            query = query.filter(SOSRequest.id == "__none__")
+        else:
+            query = query.filter(SOSRequest.assigned_to == resolved_staff.id)
     
     if status:
         query = query.filter(SOSRequest.status == status)
@@ -274,8 +464,11 @@ async def get_sos_requests(
     
     query = query.order_by(SOSRequest.priority.desc(), SOSRequest.created_at.desc())
     query = query.offset(offset).limit(limit)
-    
-    return query.all()
+
+    records = query.all()
+    for sos in records:
+        _ensure_assignment_for_active_ticket(db, sos)
+    return records
 
 @router.get("/map", response_model=List[SOSMapData])
 async def get_sos_map_data(
@@ -314,14 +507,143 @@ async def get_sos_map_data(
         for sos in sos_requests
     ]
 
+
+@router.get("/events/stream")
+async def stream_sos_events(
+    request: Request,
+    access_token: Optional[str] = Query(default=None, description="Bearer token for EventSource authentication"),
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+    db: Session = Depends(get_db),
+):
+    """
+    Server-Sent Events stream for SOS ticket changes.
+    Emits `tickets_changed` whenever ticket list/assignment/status changes.
+    """
+    _resolve_stream_user(db=db, authorization=authorization, access_token=access_token)
+
+    async def event_generator():
+        heartbeat_ticks = 0
+        last_fingerprint = ""
+
+        while True:
+            if await request.is_disconnected():
+                break
+
+            try:
+                stream_db = SessionLocal()
+                try:
+                    snapshot = _sos_change_snapshot(stream_db)
+                finally:
+                    stream_db.close()
+
+                if snapshot["fingerprint"] != last_fingerprint:
+                    last_fingerprint = snapshot["fingerprint"]
+                    payload = {
+                        "type": "tickets_changed",
+                        "server_time": datetime.utcnow().isoformat(),
+                        **snapshot,
+                    }
+                    yield f"event: tickets_changed\ndata: {json.dumps(payload)}\n\n"
+                elif heartbeat_ticks % 10 == 0:
+                    heartbeat = {"type": "heartbeat", "server_time": datetime.utcnow().isoformat()}
+                    yield f"event: heartbeat\ndata: {json.dumps(heartbeat)}\n\n"
+
+                heartbeat_ticks += 1
+                await asyncio.sleep(2)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                await asyncio.sleep(2)
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    return StreamingResponse(event_generator(), media_type="text/event-stream", headers=headers)
+
+
 @router.get("/{sos_id}", response_model=SOSRequestResponse)
-async def get_sos_request(sos_id: str, db: Session = Depends(get_db)):
+async def get_sos_request(
+    sos_id: str,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user),
+):
     """Get a specific SOS request by ID"""
     sos = db.query(SOSRequest).filter(SOSRequest.id == sos_id).first()
     if not sos:
         raise HTTPException(status_code=404, detail="SOS request not found")
+
+    _ensure_assignment_for_active_ticket(db, sos)
+
+    if (current_user.role or "").lower() == "responder":
+        resolved_staff = resolve_responder_staff(current_user, db)
+        if not resolved_staff or str(sos.assigned_to or "") != str(resolved_staff.id):
+            raise HTTPException(status_code=403, detail="Access denied for this ticket")
     
     return sos
+
+
+@router.get("/{sos_id}/media")
+async def get_ticket_media(
+    sos_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Return voice/media evidence linked to a ticket (if created via mobile pipeline)."""
+    sos = db.query(SOSRequest).filter(SOSRequest.id == sos_id).first()
+    if not sos:
+        raise HTTPException(status_code=404, detail="SOS request not found")
+
+    if (current_user.role or "").lower() == "responder":
+        resolved_staff = resolve_responder_staff(current_user, db)
+        if not resolved_staff or str(sos.assigned_to or "") != str(resolved_staff.id):
+            raise HTTPException(status_code=403, detail="Access denied for this ticket")
+
+    incident = _mobile_incident_for_ticket(db, sos)
+    if not incident:
+        return {
+            "ticket_id": str(sos.id),
+            "incident_id": None,
+            "voice_transcript": None,
+            "audio_files": [],
+            "media_manifest": {},
+        }
+
+    try:
+        media_manifest = json.loads(incident.media_manifest or "{}")
+        if not isinstance(media_manifest, dict):
+            media_manifest = {}
+    except Exception:
+        media_manifest = {}
+
+    raw_audio_items = media_manifest.get("audio") or []
+    audio_files = []
+    for item in raw_audio_items:
+        if not isinstance(item, dict):
+            continue
+        relative_path = str(item.get("relative_path") or "").strip()
+        audio_url = _to_static_media_url(request, relative_path)
+        if not audio_url:
+            continue
+        audio_files.append(
+            {
+                "file_name": item.get("file_name"),
+                "content_type": item.get("content_type"),
+                "size_bytes": item.get("size_bytes"),
+                "relative_path": relative_path,
+                "url": audio_url,
+            }
+        )
+
+    return {
+        "ticket_id": str(sos.id),
+        "incident_id": incident.external_id or incident.id,
+        "voice_transcript": incident.voice_transcript,
+        "audio_files": audio_files,
+        "media_manifest": media_manifest,
+    }
 
 @router.put("/{sos_id}", response_model=SOSRequestResponse)
 async def update_sos_request(
@@ -343,6 +665,11 @@ async def update_sos_request(
     
     if not sos:
         raise HTTPException(status_code=404, detail="SOS request not found")
+
+    if (current_user.role or "").lower() == "responder":
+        resolved_staff = resolve_responder_staff(current_user, db)
+        if not resolved_staff or str(sos.assigned_to or "") != str(resolved_staff.id):
+            raise HTTPException(status_code=403, detail="Only assigned responder can update this ticket")
     
     # Store old values for update history
     old_status = sos.status
@@ -545,7 +872,11 @@ async def assign_sos_request(
     old_org = sos.assigned_organization
     old_div = sos.assigned_division
     old_staff = sos.assigned_to
-    was_uncommitted_pending = sos.status == "Pending" and sos.assignment_time is None
+    was_uncommitted_pending = (
+        sos.status == "Pending"
+        and sos.assignment_time is None
+        and not any([sos.assigned_organization, sos.assigned_to, sos.assigned_division])
+    )
 
     # Update assignment
     if 'organization_id' in assignment_data:

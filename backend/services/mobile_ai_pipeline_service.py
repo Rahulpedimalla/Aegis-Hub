@@ -52,6 +52,29 @@ def _extract_voice_transcript(metadata: Dict[str, Any]) -> str:
     return str(raw or "").strip()
 
 
+def _looks_like_placeholder_voice_text(value: str) -> bool:
+    normalized = " ".join((value or "").strip().lower().split())
+    if not normalized:
+        return True
+    placeholders = {
+        "need assistance",
+        "need voice assistance",
+        "voice input could not be transcribed",
+        "voice note attached by reporter",
+        "sos triggered via voice recording from mobile app",
+        "sos triggered via mobile app",
+    }
+    return normalized in placeholders
+
+
+def _select_canonical_description(text: str, voice_text: str) -> str:
+    clean_voice = str(voice_text or "").strip()
+    clean_text = str(text or "").strip()
+    if clean_voice:
+        return clean_voice
+    return clean_text
+
+
 def _detect_categories(
     ticket_type: str,
     text: str,
@@ -232,6 +255,24 @@ def _media_paths(manifest: Dict[str, Any], bucket: str) -> List[str]:
     return results
 
 
+def _first_audio_reference(manifest: Dict[str, Any]) -> Dict[str, str]:
+    refs = manifest.get("audio") or []
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        path = str(ref.get("disk_path") or "").strip()
+        if not path:
+            continue
+        return {
+            "path": path,
+            "content_type": str(ref.get("content_type") or "").strip(),
+        }
+    return {
+        "path": "",
+        "content_type": "",
+    }
+
+
 def build_ai_incident_bundle(
     db: Session,
     metadata: Dict[str, Any],
@@ -258,12 +299,28 @@ def build_ai_incident_bundle(
     image_paths = _media_paths(media_manifest, "images")
     video_paths = _media_paths(media_manifest, "videos")
     audio_paths = _media_paths(media_manifest, "audio")
+    first_audio_ref = _first_audio_reference(media_manifest)
 
-    # AI STT fallback when raw transcript is not available from client.
-    if not voice_text and audio_paths:
-        transcribed = gemini_transcribe_audio(audio_paths[0], language_hint="en")
+    # Always attempt server-side transcription when audio exists to keep ticket text
+    # in sync with the uploaded voice evidence.
+    server_transcript = ""
+    transcribe_path = first_audio_ref.get("path") or (audio_paths[0] if audio_paths else "")
+    transcribe_mime = first_audio_ref.get("content_type") or None
+    if transcribe_path:
+        transcribed = gemini_transcribe_audio(
+            transcribe_path,
+            language_hint="en-IN",
+            audio_mime_type=transcribe_mime,
+        )
         if transcribed:
-            voice_text = transcribed
+            server_transcript = transcribed.strip()
+    if server_transcript:
+        if (
+            not voice_text
+            or _looks_like_placeholder_voice_text(voice_text)
+            or len(server_transcript) >= int(len(voice_text) * 0.75)
+        ):
+            voice_text = server_transcript
 
     detected_categories = _detect_categories(
         ticket_type=ticket_type,
@@ -272,6 +329,7 @@ def build_ai_incident_bundle(
         media_manifest=media_manifest,
     )
     primary_category = _primary_category(detected_categories)
+    canonical_description = _select_canonical_description(text=text, voice_text=voice_text)
 
     image_insight = gemini_multimodal_media_insight(image_paths, context_hint="image evidence") if image_paths else None
     video_insight = gemini_multimodal_media_insight(video_paths, context_hint="video evidence") if video_paths else None
@@ -292,7 +350,7 @@ def build_ai_incident_bundle(
         people_hint = max(people_hint, _to_int(ai_structured.get("people_estimate"), people_hint))
 
     triage = triage_sos(
-        text=text or combined_context,
+        text=canonical_description or combined_context,
         voice_transcript=voice_text,
         people=people_hint,
         category_hint=str(ai_structured.get("incident_type") or "").strip() or None,
@@ -310,9 +368,9 @@ def build_ai_incident_bundle(
 
     summary = str(ai_structured.get("concise_summary") or "").strip()
     if not summary:
-        summary = gemini_summarize_incident(combined_context or text or voice_text or incident_type) or ""
+        summary = gemini_summarize_incident(combined_context or canonical_description or incident_type) or ""
     if not summary:
-        summary = (combined_context or text or voice_text or "Emergency incident reported")[:180]
+        summary = (combined_context or canonical_description or "Emergency incident reported")[:180]
     if len(summary) > 180:
         summary = summary[:177] + "..."
 
@@ -381,7 +439,8 @@ def build_ai_incident_bundle(
         },
         "event_timestamp": event_timestamp.isoformat(),
         "description": {
-            "text": text,
+            "text": canonical_description,
+            "typed_text": text,
             "voice_transcript": voice_text,
             "image_insight": image_insight or "",
             "video_insight": video_insight or "",
@@ -406,7 +465,7 @@ def build_ai_incident_bundle(
         "incident_type": incident_type,
         "timestamp": event_timestamp.isoformat(),
         "summary": summary,
-        "text": text or summary,
+        "text": canonical_description or summary,
         "voice_transcript": voice_text,
         "people": max(1, _to_int(triage.get("people"), people_hint)),
         "place": str(metadata.get("place") or "").strip() or f"{latitude:.5f},{longitude:.5f}",
@@ -446,7 +505,7 @@ def build_ai_incident_bundle(
         "nearby_ticket_count": nearby_ticket_count,
         "detected_categories": detected_categories,
         "primary_category": primary_category,
-        "text": text,
+        "text": canonical_description or text,
         "voice_transcript": voice_text,
         "latitude": latitude,
         "longitude": longitude,

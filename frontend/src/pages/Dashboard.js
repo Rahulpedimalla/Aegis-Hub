@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { 
   Users, 
   AlertTriangle, 
@@ -12,6 +12,7 @@ import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContaine
 import axios from 'axios';
 import toast from 'react-hot-toast';
 import { useAuth } from '../contexts/AuthContext';
+import { SOS_CHANGED_EVENT } from '../utils/sosRealtime';
 
 const Dashboard = () => {
   const { user } = useAuth();
@@ -24,13 +25,12 @@ const Dashboard = () => {
   const [divisionStats, setDivisionStats] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    fetchDashboardData();
-  }, []);
-
-  const fetchDashboardData = async () => {
+  const fetchDashboardData = useCallback(async (options = { silent: false }) => {
+    const silent = Boolean(options?.silent);
     try {
-      setLoading(true);
+      if (!silent) {
+        setLoading(true);
+      }
       const [statsRes, regionRes, activityRes, alertsRes, orgRes, staffRes, divisionRes] = await Promise.all([
         axios.get('/api/dashboard/stats'),
         axios.get('/api/dashboard/regions'),
@@ -49,12 +49,27 @@ const Dashboard = () => {
       setStaffStats(staffRes.data);
       setDivisionStats(divisionRes.data);
     } catch (error) {
-      toast.error('Failed to fetch dashboard data');
+      if (!silent) {
+        toast.error('Failed to fetch dashboard data');
+      }
       console.error('Dashboard data fetch error:', error);
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    fetchDashboardData();
+    const timer = setInterval(() => fetchDashboardData({ silent: true }), 45000);
+    const onSosChanged = () => fetchDashboardData({ silent: true });
+    window.addEventListener(SOS_CHANGED_EVENT, onSosChanged);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener(SOS_CHANGED_EVENT, onSosChanged);
+    };
+  }, [fetchDashboardData]);
 
   if (loading) {
     return (

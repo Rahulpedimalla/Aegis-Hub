@@ -90,6 +90,12 @@ class HomeScreen extends ConsumerWidget {
                     ],
                     if (state.isRecording) ...[
                       const SizedBox(height: 12),
+                      const Text(
+                        'Recording will auto-submit a few seconds after speech stops.',
+                        style: TextStyle(fontSize: 12, color: Colors.black54),
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 6),
                       TextButton.icon(
                         onPressed: state.isSubmitting ? null : controller.cancelSos,
                         icon: const Icon(Icons.close),

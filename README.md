@@ -159,6 +159,7 @@ Supporting endpoints:
 - `POST /api/mobile/dispatch/retry-pending` -> retry queued/failed dispatches.
 - `GET /api/mobile/incidents/{incident_id}` -> incident processing and dispatch status.
 - `POST /api/mobile/ai/voice-agent` -> Gemini-powered voice/text follow-up response.
+- `POST /api/mobile/ai/transcribe` -> Gemini-powered raw audio transcription for mobile STT.
 
 Example ingest call:
 

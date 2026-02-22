@@ -24,7 +24,10 @@ from routes import mobile_routes
 
 # Load environment variables (optional)
 try:
-    load_dotenv()
+    env_dir = Path(__file__).resolve().parent
+    load_dotenv(env_dir / ".env")
+    # Local override file for secrets (gitignored).
+    load_dotenv(env_dir / ".env.local", override=True)
 except:
     pass
 

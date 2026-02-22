@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:record/record.dart';
 
 import '../../../core/providers.dart';
 import '../domain/entities/chat_message.dart';
@@ -17,6 +20,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   final _scrollController = ScrollController();
   bool _voiceMode = false;
   bool _recordingVoiceInput = false;
+  StreamSubscription<Amplitude>? _amplitudeSubscription;
+  DateTime? _voiceStartedAt;
+  DateTime? _lastSpeechAt;
+  bool _heardSpeech = false;
+  bool _autoStopping = false;
 
   @override
   void initState() {
@@ -29,9 +37,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
   @override
   void dispose() {
+    _stopAmplitudeWatcher();
     if (_recordingVoiceInput) {
       ref.read(audioCaptureServiceProvider).cancelRecording();
     }
+    ref.read(liveTranscriptionServiceProvider).cancel();
     _messageController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -143,21 +153,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                           }
 
                           if (!_recordingVoiceInput) {
-                            final started = await ref.read(audioCaptureServiceProvider).startRecording();
-                            if (started) {
-                              setState(() => _recordingVoiceInput = true);
-                            }
+                            await _startVoiceCapture();
                             return;
                           }
 
-                          final path = await ref.read(audioCaptureServiceProvider).stopRecording();
-                          setState(() => _recordingVoiceInput = false);
-                          final fallbackText = _messageController.text.trim();
-                          _messageController.clear();
-                          await controller.sendVoiceMessage(
-                            audioPath: (path ?? '').trim().isEmpty ? null : path,
-                            textHint: fallbackText.isEmpty ? null : fallbackText,
-                          );
+                          await _stopVoiceCaptureAndSend(controller);
                         },
                   child: state.isSending
                       ? const SizedBox.square(
@@ -177,12 +177,97 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             const Padding(
               padding: EdgeInsets.only(bottom: 12),
               child: Text(
-                'Recording voice input... tap mic again to send.',
+                'Recording voice input... auto-sends after speech stops or tap mic to send now.',
                 style: TextStyle(color: Colors.red),
               ),
             ),
         ],
       ),
     );
+  }
+
+  Future<void> _startVoiceCapture() async {
+    final messenger = ScaffoldMessenger.of(context);
+    final started = await ref.read(audioCaptureServiceProvider).startRecording();
+    if (!started) {
+      if (mounted) {
+        messenger.showSnackBar(
+          const SnackBar(content: Text('Unable to start voice recording on this device/browser.')),
+        );
+      }
+      return;
+    }
+
+    if (!mounted) return;
+    setState(() => _recordingVoiceInput = true);
+    await ref.read(liveTranscriptionServiceProvider).start(localeId: 'en_IN');
+    _startAmplitudeWatcher();
+  }
+
+  Future<void> _stopVoiceCaptureAndSend(ChatController controller) async {
+    if (_autoStopping && !mounted) {
+      return;
+    }
+    _stopAmplitudeWatcher();
+    final liveTranscript = await ref.read(liveTranscriptionServiceProvider).stopAndCollect();
+    final recording = await ref.read(audioCaptureServiceProvider).stopRecording();
+    if (!mounted) return;
+    setState(() => _recordingVoiceInput = false);
+
+    final typedFallbackText = _messageController.text.trim();
+    final fallbackText = typedFallbackText.isNotEmpty ? typedFallbackText : liveTranscript;
+    _messageController.clear();
+    await controller.sendVoiceMessage(
+      audioPath: (recording?.path ?? '').trim().isEmpty ? null : recording!.path,
+      audioMimeType: recording?.mimeType,
+      audioFileName: recording?.fileName,
+      textHint: fallbackText.isEmpty ? null : fallbackText,
+    );
+  }
+
+  void _startAmplitudeWatcher() {
+    _stopAmplitudeWatcher();
+    _voiceStartedAt = DateTime.now().toUtc();
+    _lastSpeechAt = _voiceStartedAt;
+    _heardSpeech = false;
+    _autoStopping = false;
+
+    _amplitudeSubscription = ref
+        .read(audioCaptureServiceProvider)
+        .onAmplitudeChanged(const Duration(milliseconds: 250))
+        .listen((amplitude) async {
+      if (_autoStopping || !_recordingVoiceInput) {
+        return;
+      }
+
+      final now = DateTime.now().toUtc();
+      final isSpeechFrame = amplitude.current > -45;
+      if (isSpeechFrame) {
+        _heardSpeech = true;
+        _lastSpeechAt = now;
+        return;
+      }
+
+      if (!_heardSpeech || _voiceStartedAt == null || _lastSpeechAt == null) {
+        return;
+      }
+
+      final recordingFor = now.difference(_voiceStartedAt!);
+      final silenceFor = now.difference(_lastSpeechAt!);
+      if (recordingFor >= const Duration(seconds: 2) && silenceFor >= const Duration(seconds: 3)) {
+        _autoStopping = true;
+        final controller = ref.read(chatControllerProvider.notifier);
+        await _stopVoiceCaptureAndSend(controller);
+      }
+    });
+  }
+
+  void _stopAmplitudeWatcher() {
+    _amplitudeSubscription?.cancel();
+    _amplitudeSubscription = null;
+    _voiceStartedAt = null;
+    _lastSpeechAt = null;
+    _heardSpeech = false;
+    _autoStopping = false;
   }
 }

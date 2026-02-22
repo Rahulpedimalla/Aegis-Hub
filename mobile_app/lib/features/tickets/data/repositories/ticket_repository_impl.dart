@@ -21,25 +21,17 @@ class TicketRepositoryImpl implements TicketRepository {
   @override
   Future<TicketSubmissionResult> submitTicket(TicketPayload payload) async {
     final hasNetwork = await _connectivityService.hasNetwork();
-    if (!hasNetwork) {
-      await _queueStore.enqueue(payload.toQueueJson());
-      return TicketSubmissionResult(
-        ticketId: payload.externalId,
-        status: 'queued_offline',
-        isQueued: true,
-        reassuranceMessage: 'Ticket queued locally. We will send when network is available.',
-      );
-    }
-
     try {
       return await _apiClient.submitTicket(payload);
     } on RecoverableNetworkException {
       await _queueStore.enqueue(payload.toQueueJson());
       return TicketSubmissionResult(
         ticketId: payload.externalId,
-        status: 'queued_retry',
+        status: hasNetwork ? 'queued_retry' : 'queued_offline',
         isQueued: true,
-        reassuranceMessage: 'Ticket queued for retry due to temporary network/server issue.',
+        reassuranceMessage: hasNetwork
+            ? 'Ticket queued for retry due to temporary network/server issue.'
+            : 'Ticket queued locally. We will send when network is available.',
       );
     }
   }

@@ -8,7 +8,9 @@ class CartesiaSttProvider implements SttProvider {
   @override
   Future<VoiceTranscript> transcribeFile({
     required String audioPath,
-    String languageCode = 'en',
+    String languageCode = 'en-IN',
+    String? audioMimeType,
+    String? audioFileName,
   }) async {
     return const VoiceTranscript(
       rawText: '[raw transcript pending provider integration]',
